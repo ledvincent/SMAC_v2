@@ -11,6 +11,7 @@ from tqdm import tqdm
 from modules.agents.hpns_rnn_agent import HPNS_RNNAgent
 from modules.agents.ss_rnn_agent import SS_RNNAgent
 from modules.agents.updet_agent import UPDeT
+from modules.agents.att_agent import SS_HF_RNNAgent
 
 from modules.mixers.nmix import Mixer
 from modules.mixers.ss_mixer import SSMixer
