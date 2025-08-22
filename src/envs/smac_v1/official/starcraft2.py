@@ -96,6 +96,7 @@ class StarCraft2Env(MultiAgentEnv):
         heuristic_ai=False,
         heuristic_rest=False,
         debug=False,
+        use_extended_action_masking = False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -240,9 +241,14 @@ class StarCraft2Env(MultiAgentEnv):
         self.replay_prefix = replay_prefix
 
         # Actions
+        self.use_extended_action_masking = use_extended_action_masking
         self.n_actions_no_attack = 6
         self.n_actions_move = 4
-        self.n_actions = self.n_actions_no_attack + self.n_enemies
+        
+        if self.use_extended_action_masking:
+            self.n_actions = self.n_actions_no_attack + self.n_agents + self.n_enemies
+        else:
+            self.n_actions = self.n_actions_no_attack + self.n_enemies
 
         # Map info
         self._agent_race = map_params["a_race"]
@@ -631,6 +637,8 @@ class StarCraft2Env(MultiAgentEnv):
                 target_unit = self.agents[target_id]
                 action_name = "heal"
             else:
+                if self.use_extended_action_masking:
+                    target_id -= self.n_agents
                 target_unit = self.enemies[target_id]
                 action_name = "attack"
 
@@ -1412,9 +1420,65 @@ class StarCraft2Env(MultiAgentEnv):
                     type_id = 2
 
         return type_id
+    
+    def get_extended_avail_agent_actions(self, agent_id):
+        """Returns the available actions for agent_id."""
+        
+        unit = self.get_unit_by_id(agent_id)
+        if unit.health > 0:
+            # cannot choose no-op when alive
+            avail_actions = [0] * self.n_actions
+
+            # stop should be allowed
+            avail_actions[1] = 1
+
+            # see if we can move
+            if self.can_move(unit, Direction.NORTH):
+                avail_actions[2] = 1
+            if self.can_move(unit, Direction.SOUTH):
+                avail_actions[3] = 1
+            if self.can_move(unit, Direction.EAST):
+                avail_actions[4] = 1
+            if self.can_move(unit, Direction.WEST):
+                avail_actions[5] = 1
+
+            # Can attack only alive units that are alive in the shooting range
+            shoot_range = self.unit_shoot_range(agent_id)
+
+            if self.map_type == "MMM" and unit.unit_type == self.medivac_id:
+                # Medivacs cannot heal themselves or other flying units
+                target_items = [(agent_id, unit)]
+                for (t_id, t_unit) in self.agents.items():
+                    if t_id != agent_id:
+                        target_items.append((t_id, t_unit))
+                idx = 0
+                for t_id, t_unit in target_items:
+                    if t_unit.health > 0 and t_unit.unit_type != self.medivac_id:
+                        dist = self.distance(
+                            unit.pos.x, unit.pos.y, t_unit.pos.x, t_unit.pos.y
+                        )
+                        if dist <= shoot_range:
+                            avail_actions[idx + self.n_actions_no_attack] = 1
+                    idx += 1
+                return avail_actions
+            else:
+                for t_id, t_unit in self.enemies.items():
+                    if t_unit.health > 0:
+                        dist = self.distance(
+                            unit.pos.x, unit.pos.y, t_unit.pos.x, t_unit.pos.y
+                        )
+                        if dist <= shoot_range:
+                            avail_actions[t_id + self.n_actions_no_attack + self.n_agents] = 1  
+                return avail_actions
+        else:   
+            # only no-op allowed
+            return [1] + [0] * (self.n_actions - 1)
 
     def get_avail_agent_actions(self, agent_id):
         """Returns the available actions for agent_id."""
+        if self.use_extended_action_masking:
+            return self.get_extended_avail_agent_actions(agent_id)
+        
         unit = self.get_unit_by_id(agent_id)
         if unit.health > 0:
             # cannot choose no-op when alive

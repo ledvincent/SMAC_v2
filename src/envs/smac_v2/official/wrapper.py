@@ -1,6 +1,5 @@
 from .distributions import get_distribution
 from .starcraft2 import StarCraft2Env
-from .starcraft2_hxt import StarCraft2Env as StarCraft2EnvMoveWithFov
 from envs.multiagentenv import MultiAgentEnv
 
 
@@ -9,8 +8,7 @@ class StarCraftCapabilityEnvWrapper(MultiAgentEnv):
         self.distribution_config = kwargs["capability_config"]
         self.env_key_to_distribution_map = {}
         self._parse_distribution_config()
-        change_fov_with_move = kwargs.pop("change_fov_with_move")
-        self.env = StarCraft2EnvMoveWithFov(**kwargs) if change_fov_with_move else StarCraft2Env(**kwargs)
+        self.env = StarCraft2Env(**kwargs)
         assert (
                 self.distribution_config.keys()
                 == kwargs["capability_config"].keys()
@@ -18,11 +16,12 @@ class StarCraftCapabilityEnvWrapper(MultiAgentEnv):
 
     def _parse_distribution_config(self):
         for env_key, config in self.distribution_config.items():
-            if env_key == "n_units":
+            if env_key == "n_units" or env_key == "n_enemies":
                 continue
             config["env_key"] = env_key
             # add n_units key
             config["n_units"] = self.distribution_config["n_units"]
+            config["n_enemies"] = self.distribution_config["n_enemies"]
             distribution = get_distribution(config["dist_type"])(config)
             self.env_key_to_distribution_map[env_key] = distribution
 
