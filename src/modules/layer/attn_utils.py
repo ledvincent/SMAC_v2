@@ -6,16 +6,6 @@ import math
 from typing import Optional
 
 # ------------------------------- utils -------------------------------
-
-def _masked_mean(x, mask, dim):
-    """Masked mean over dim; mask True=valid. Works for 2D/3D+ by auto-expanding mask."""
-    while mask.ndim < x.ndim:
-        mask = mask.unsqueeze(-1)
-    m = mask.to(dtype=x.dtype)
-    num = (x * m).sum(dim=dim)
-    den = m.sum(dim=dim).clamp(min=1.0)
-    return num / den
-
 class GroupTemp(nn.Module):
     def __init__(self):
         super().__init__()
@@ -26,6 +16,47 @@ class GroupTemp(nn.Module):
         # T = softplus(alpha * log(n) + beta)
         n = counts.clamp(min=1.0)
         return F.softplus(self.alpha * th.log(n) + self.beta) + 1e-6
+    
+class GeomPrior(nn.Module):
+    """
+    Per-enemy prior score s[B,N] (not used inside attention).
+    Higher => 'better to shoot': closer ↑ (-log1p(dist)), lower hp ↑, lower shield ↑.
+    Masked mean-centers across valid enemies to keep scale independent of set size.
+    Adds a mild negative push for not-currently-shootable enemies.
+    """
+    def __init__(self, tanh_c: float = 4.0, use_hp: bool = True, use_shield: bool = True,
+                 not_shootable_push: float = 2.0):
+        super().__init__()
+        self.tanh_c = tanh_c
+        self.use_hp = use_hp
+        self.use_shield = use_shield
+        self.register_buffer("no_shoot_push", th.tensor(float(not_shootable_push)))
+        nF = 1 + int(use_hp) + int(use_shield)  # [-log1p(dist), -hp?, -shield?]
+        self.w = nn.Parameter(th.zeros(nF))     # starts neutral
+
+    def _features(self, enemy_raw: th.Tensor) -> th.Tensor:
+        # Expected SMAC-ish layout; adjust indices if yours differ:
+        #   0: available_to_shoot(0/1), 1: distance, 4: hp, 5: shield
+        dist = enemy_raw[..., 1].clamp_min(0.0)        # [B,N]
+        feats = [(-th.log1p(dist)).unsqueeze(-1)]      # closer -> larger
+        if self.use_hp and enemy_raw.size(-1) > 4:
+            feats.append((-enemy_raw[..., 4].clamp(0, 1)).unsqueeze(-1))
+        if self.use_shield and enemy_raw.size(-1) > 5:
+            feats.append((-enemy_raw[..., 5].clamp(0, 1)).unsqueeze(-1))
+        return th.cat(feats, dim=-1)                   # [B,N,F]
+
+    def forward(self, enemy_raw: th.Tensor, enemy_mask: th.Tensor) -> th.Tensor:
+        m = enemy_mask.to(enemy_raw.dtype)             # [B,N]
+        X = self._features(enemy_raw)                  # [B,N,F]
+        Xm  = X * m.unsqueeze(-1)
+        den = m.sum(1, keepdim=True).clamp(min=1.0)
+        mu  = Xm.sum(1, keepdim=True) / den.unsqueeze(-1)  # [B,1,F]
+        s   = th.matmul(X - mu, self.w).squeeze(-1)        # [B,N]
+        s   = self.tanh_c * th.tanh(s)
+        if enemy_raw.size(-1) >= 1:
+            available = (enemy_raw[..., 0] > 0.5).to(enemy_raw.dtype)
+            s = s - (1.0 - available) * self.no_shoot_push
+        return s * m                                      # [B,N]
 
 # ------------------------------- layers ------------------------------
 
@@ -36,7 +67,6 @@ class MultiHeadGroupAttn(nn.Module):
       q_src: [B, H]    (own context query)
       group: [B, N, H] ally/enemy features. keys/values come from this set
       mask: [B, N]     (bool) mask out invalid entities
-      logit_bias: [B, heads, N] (optional per-head bias)
       group_temp: [B] (optional group temperature)
     """
     def __init__(self, hidden_dim, n_heads):
