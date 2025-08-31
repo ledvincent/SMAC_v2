@@ -108,11 +108,14 @@ if __name__ == '__main__':
     
     # Save to disk by default for sacred
     map_name = parse_command(params, "env_args.map_name", config_dict['env_args']['map_name'])
+    n_allies = parse_command(params, "env_args.capability_config.n_units", config_dict['env_args']['capability_config']['n_units'])
+    n_enemies = parse_command(params, "env_args.capability_config.n_enemies", config_dict['env_args']['capability_config']['n_enemies'])
+    battle_config = f"{int(n_allies)}v{int(n_enemies)}"
     algo_name = parse_command(params, "name", config_dict['name'])
     
     local_results_path = parse_command(params, "local_results_path", config_dict['local_results_path'])
     local_results_path = os.path.expanduser(local_results_path)
-    file_obs_path = join(local_results_path, "sacred", map_name, algo_name)
+    file_obs_path = join(local_results_path, "sacred", map_name, battle_config, algo_name)
     logger.info("Saving to FileStorageObserver in {}.".format(file_obs_path))
     ex.observers.append(FileStorageObserver.create(file_obs_path))
 

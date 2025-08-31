@@ -20,19 +20,19 @@ target_update_interval: 200
 # use the Q_Learner to train
 mac: "ss_mac"
 #agent: "hpn_rnn"
-agent: "att_rnn"
+agent: "att_rnn2"
 
 hidden_size: 64
-n_head: 4
+n_head: 1
 agent_output_type: q
 hs_query: True
 
-use_film: False
-use_lora: False
-use_heuristic_topk: False
-use_pointer: False
-topk_enemies: 0
-adapter_rank: 4
+use_group_card_temp: True
+use_geom_bias: True
+geom_tanh_c: 2.0
+use_refine_shoot: True
+prototype_movement: True
+
 
 learner: "nq_learner"
 mixer: "ss_mixer"
