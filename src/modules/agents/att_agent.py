@@ -8,26 +8,9 @@ import torch.nn.functional as F
 
 from modules.layer.attn_utils import ConditionalLayerNorm, MultiHeadGroupAttn, GroupTemp, GeomPrior
 
-"""
-MoGA‑GRU (final, SS-compatible, no extended-action path)
--------------------------------------------------------
-- Same IO as SPECTRA's SS_RNNAgent:
-    forward(inputs, hidden_state) -> (Q, hidden')
-  inputs is a tuple: (bs, own[Bn,1,Do], allies[Bn,Na,Da], enemies[Bn,Ne,De], embedding_indices)
-  hidden_state: [bs, n_agents, H]
-  outputs: Q [Bn,1, A_move + Ne], hidden' [bs,n_agents,H]
-- No self-attention; O(n_allies + n_enemies)
-- Grouped single-query **multi-head** cross-attn (ally/enemy), with **per-head enemy logit bias**
-- Optional group-cardinality temperature per group
-- Mixture over {ally, enemy, self} → **GRU** (like SPECTRA)
-- Movement head: prototype attention (PI)
-- Shooting head: pointer/QK (PE) **over enemies only** (no extended-action variant)
-- Calibration: shared V, type biases, temperatures, within-family mean-centering
-"""
-
 # ------------------------------- agent -------------------------------
 
-class SS_MoGA_RNNAgent(nn.Module):
+class CustomAtt_RNNAgent(nn.Module):
     def __init__(self, input_shape, args):
         super().__init__()
         self.args = args
@@ -266,8 +249,8 @@ class SS_MoGA_RNNAgent(nn.Module):
         den_e = enemy_mask.float().sum(dim=1, keepdim=True).clamp(min=1.0)
         mean_e = (a * enemy_mask.float()).sum(dim=1, keepdim=True) / den_e
         a = a - mean_e
-        very_neg = th.finfo(a.dtype).min
-        a = th.where(enemy_mask, a, th.full_like(a, very_neg))
+        very_neg = th.finfo(a.dtype).min        # most negative finite number representable in that dtype
+        a = a.masked_fill(~enemy_mask, very_neg)
         Q_shoot = (V + b_shoot + (a / tau_shoot))         # [Bn,nE]
 
         # Final concat with movement

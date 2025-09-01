@@ -25,14 +25,19 @@ agent: "att_rnn"
 hidden_size: 64
 n_head: 4
 agent_output_type: q
-hs_query: True
+hs_query: False
+use_group_card_temp: False
 
-use_film: False
-use_lora: False
-use_heuristic_topk: False
-use_pointer: False
-topk_enemies: 0
-adapter_rank: 4
+use_refine_shoot: False
+prototype_movement: False
+use_cln: False                 # Conditional LayerNorm on attention summaries
+use_shoot_prior: False         # Geometry-based prior added to shooting logits
+use_tau_shoot_mod: False       # Modulate τ_shoot from enemy context zE
+use_zE_pointer_resid: False   # Disable gated residual from zE into shooting query
+
+# (Optional prior hyperparams; agent has safe defaults if omitted)
+prior_tanh_c: 4.0
+prior_no_shoot_push: 2.0
 
 learner: "nq_learner"
 mixer: "ss_mixer"

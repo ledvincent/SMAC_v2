@@ -18,12 +18,6 @@ class GroupTemp(nn.Module):
         return F.softplus(self.alpha * th.log(n) + self.beta) + 1e-6
     
 class GeomPrior(nn.Module):
-    """
-    Per-enemy prior score s[B,N] (not used inside attention).
-    Higher => 'better to shoot': closer ↑ (-log1p(dist)), lower hp ↑, lower shield ↑.
-    Masked mean-centers across valid enemies to keep scale independent of set size.
-    Adds a mild negative push for not-currently-shootable enemies.
-    """
     def __init__(self, tanh_c: float = 4.0, use_hp: bool = True, use_shield: bool = True,
                  not_shootable_push: float = 2.0):
         super().__init__()
@@ -35,7 +29,6 @@ class GeomPrior(nn.Module):
         self.w = nn.Parameter(th.zeros(nF))     # starts neutral
 
     def _features(self, enemy_raw: th.Tensor) -> th.Tensor:
-        # Expected SMAC-ish layout; adjust indices if yours differ:
         #   0: available_to_shoot(0/1), 1: distance, 4: hp, 5: shield
         dist = enemy_raw[..., 1].clamp_min(0.0)        # [B,N]
         feats = [(-th.log1p(dist)).unsqueeze(-1)]      # closer -> larger
@@ -116,7 +109,6 @@ class MultiHeadGroupAttn(nn.Module):
         return self.out(ctx), attn      # ([B,H], [B,n_heads,N])
 
 class ConditionalLayerNorm(nn.Module):
-    """LayerNorm(x) then affine from context (starts as identity)."""
     def __init__(self, hidden):
         super().__init__()
         self.ln = nn.LayerNorm(hidden, elementwise_affine=False)
