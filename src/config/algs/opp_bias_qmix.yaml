@@ -1,0 +1,47 @@
+# This is the default configuration for the SPECTra-QMIX+ algorithm
+
+t_max: 2000000
+
+# use epsilon greedy action selector
+action_selector: "epsilon_greedy"
+epsilon_start: 1.0
+epsilon_finish: 0.05
+epsilon_anneal_time: 100000 # 500000 for 6h_vs_8z
+
+runner: "parallel"
+batch_size_run: 8
+buffer_size: 5000
+batch_size: 128
+
+# update the target network every {} episodes
+target_update_interval: 200
+
+# use the Q_Learner to train
+mac: "ss_mac"
+agent: "bias_agent"
+hidden_size: 64
+n_head: 4
+
+# Optional flags
+use_group_card_temp: False
+use_spectral_norm: True
+q_strat: "opp_bias"
+use_film: True
+
+agent_output_type: q
+
+learner: "nq_learner"
+mixer: "ss_mixer"
+
+mixing_n_head: 4
+hypernet_embed: 32
+
+lr: 0.001 # Learning rate for agents
+td_lambda: 0.6
+optimizer: 'adam'
+q_lambda: False
+
+name: "opp_bias_qmix"
+
+obs_agent_id: False # Include the agent's one_hot id in the observation
+obs_last_action: False # Include the agent's last action (one_hot) in the observation
