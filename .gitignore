@@ -5,3 +5,4 @@ __pycache__/
 3rdparty/
 results/
 src/models/
+src/plots/
