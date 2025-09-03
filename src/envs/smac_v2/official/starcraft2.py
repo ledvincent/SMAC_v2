@@ -116,6 +116,7 @@ class StarCraft2Env(MultiAgentEnv):
         prob_obs_enemy=1.0,
         action_mask=False,
         use_extended_action_masking = False,
+        use_full_feat = False,
     ):
         """
         Create a StarCraftC2Env environment.
@@ -311,6 +312,7 @@ class StarCraft2Env(MultiAgentEnv):
 
         # Actions
         self.use_extended_action_masking = use_extended_action_masking
+        self.use_full_feat = use_full_feat
         self.n_actions_move = 4
         self.n_actions_no_attack = self.n_actions_move + self.n_fov_actions + 2
         if self.use_extended_action_masking:
@@ -1594,7 +1596,9 @@ class StarCraft2Env(MultiAgentEnv):
                         enemy_feats[e_id, ind + type_id] = 1  # unit type
 
                 if self.obs_enemies[e_id, agent_id] == 0:
-                    enemy_feats = np.zeros(enemy_feats_dim, dtype=np.float32)
+                    # enemy_feats = np.zeros(enemy_feats_dim, dtype=np.float32) # bug?
+                    enemy_feats[e_id, :] = 0.0
+
             # Ally features
             al_ids = [
                 al_id for al_id in range(self.n_agents) if al_id != agent_id
@@ -1691,6 +1695,19 @@ class StarCraft2Env(MultiAgentEnv):
             if self.conic_fov:
                 own_feats[ind : ind + 2] = self.fov_directions[agent_id]
                 ind += 2
+
+            if self.use_full_feat:
+                sight_range = self.unit_sight_range(agent_id)
+                shoot_range = self.unit_shoot_range(agent_id)
+                cd_max = self.unit_max_cooldown(unit)
+
+                if (self.map_type in ["MMM", "terran_gen"]) and unit.unit_type == self.medivac_id:
+                    cd_norm = float(unit.energy) / cd_max
+                else:
+                    cd_norm = float(unit.weapon_cooldown) / cd_max
+                own_feats[ind : ind + 3] = [sight_range, shoot_range, cd_norm]
+                ind += 3
+
             # own_feats[ind] = self.unit_shoot_range(agent_id)
             # ind += 1
             if self.unit_type_bits > 0:
@@ -1947,6 +1964,8 @@ class StarCraft2Env(MultiAgentEnv):
             own_feats += 2
         if self.obs_own_pos and self.obs_starcraft:
             own_feats += 2
+        if self.use_full_feat and self.obs_starcraft:
+            own_feats += 3 # sight range, shoot range, cooldown
         return own_feats
 
     def get_obs_move_feats_size(self):

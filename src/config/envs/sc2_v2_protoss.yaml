@@ -1,6 +1,7 @@
 env: sc2_v2
 
 env_args:
+  use_unit_ranges: True
   use_extended_action_masking: False
   #  %%%%%%%%%%%%%%%%%%%%%% new config compared to v1 %%%%%%%%%%%%%%%%%%%%%%
   capability_config:

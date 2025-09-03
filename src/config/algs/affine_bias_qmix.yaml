@@ -23,7 +23,7 @@ hidden_size: 64
 n_head: 4
 
 # Optional flags
-use_group_card_temp: False
+use_group_card_temp: True
 use_spectral_norm: True
 q_strat: "affine_bias"
 use_film: True
