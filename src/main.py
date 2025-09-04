@@ -115,7 +115,10 @@ if __name__ == '__main__':
     
     local_results_path = parse_command(params, "local_results_path", config_dict['local_results_path'])
     local_results_path = os.path.expanduser(local_results_path)
-    file_obs_path = join(local_results_path, "sacred", map_name, battle_config, algo_name)
+    if config_dict['env_args']['use_full_feat']:
+        file_obs_path = join(local_results_path, "sacred2", map_name, battle_config, algo_name)
+    else:
+        file_obs_path = join(local_results_path, "sacred", map_name, battle_config, algo_name)
     logger.info("Saving to FileStorageObserver in {}.".format(file_obs_path))
     ex.observers.append(FileStorageObserver.create(file_obs_path))
 

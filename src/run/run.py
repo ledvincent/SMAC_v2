@@ -120,6 +120,13 @@ def init_env(args, logger, init = False, eval_args = None, runner = None, learne
     args.obs_shape = env_info["obs_shape"]
     args.accumulated_episodes = getattr(args, "accumulated_episodes", None)
     
+    # --- sanity-check observation split vs flat obs length ---
+    m, (nE, dE), (nA, dA), own = env_info["obs_component"]
+    need = m + nE*dE + nA*dA + own
+    assert env_info["obs_shape"] == need, f"Obs dim mismatch: got {env_info['obs_shape']}, expected {need}"
+    print(f"[obs_component] move={m}, enemy={(nE,dE)}, ally={(nA,dA)}, own={own}")
+
+
     if args.env in ["sc2", "sc2_v2", "gfootball"]:
         if args.env in ["sc2", "sc2_v2"]:
             args.output_normal_actions = env_info["n_normal_actions"]

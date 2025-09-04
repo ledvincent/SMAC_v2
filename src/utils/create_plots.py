@@ -278,7 +278,7 @@ def get_model_variant_data(dataframes, game_name, model_variant):
     return df_wide_train, df_wide_test
 
 
-def prepare_avg_data_for_plotting(dataframes, game_name, game_model, ci_z=1.15):
+def prepare_avg_data_for_plotting(dataframes, game_name, game_model, ci_z=1.15, max_step=None):
     # ci_z=1.15 ~ 75% CI; using columns (#runs) for SEM
     models_to_plot = game_model[game_name]
     avg_data = {}
@@ -292,6 +292,8 @@ def prepare_avg_data_for_plotting(dataframes, game_name, game_model, ci_z=1.15):
                 mean  = np.array([])
                 lower = upper = np.array([])
             else:
+                if max_step is not None:
+                    df = df[df.index <= max_step]
                 steps = df.index.to_numpy()
                 mean  = df.mean(axis=1).to_numpy()
                 std   = df.std(axis=1).to_numpy()
@@ -308,7 +310,7 @@ def prepare_avg_data_for_plotting(dataframes, game_name, game_model, ci_z=1.15):
     return avg_data
 
 
-def prepare_best_data_for_plotting(dataframes, game_name, best_model):
+def prepare_best_data_for_plotting(dataframes, game_name, best_model, max_step=None):
     models_to_plot = {m: r for m, r in best_model[game_name].items() if r is not None}
     best_data = {}
 
@@ -322,6 +324,10 @@ def prepare_best_data_for_plotting(dataframes, game_name, best_model):
             if df_mean.empty or f"{model}_{run_num}" not in df_mean.columns:
                 steps = np.array([]); mean = lower = upper = np.array([])
             else:
+                if max_step is not None:
+                    df_mean = df_mean[df_mean.index <= max_step]
+                    if not df_std.empty:
+                        df_std = df_std[df_std.index <= max_step]
                 steps = df_mean.index.to_numpy()
                 mean  = df_mean[f"{model}_{run_num}"].to_numpy()
                 std   = df_std[f"{model}_{run_num}"].to_numpy() if not df_std.empty and f"{model}_{run_num}" in df_std.columns else np.zeros_like(mean)
@@ -421,7 +427,7 @@ def create_plots(data, game_name, best_or_avg, output_dir, palette=None, test_on
     else:
         ax.set_title(title)
 
-def create_subplots(base_game, same_game, dataframes, all_models, model_type, best_or_avg, output_dir, test_only=False, fill_between=True):
+def create_subplots(base_game, same_game, dataframes, all_models, model_type, best_or_avg, output_dir, test_only=False, fill_between=True, max_step=None):
     n_tasks = len(same_game)
     fig, axs = plt.subplots(1, n_tasks, figsize=(15 * n_tasks, 15), sharex=True)
     if n_tasks == 1:
@@ -434,7 +440,10 @@ def create_subplots(base_game, same_game, dataframes, all_models, model_type, be
     legend_handles = common_legend(all_models, palette, test_only)
 
     for ax, game_name in zip(axs, same_game):
-        plot_data = plot_function(dataframes, game_name, model_type)
+        if best_or_avg == 'best':
+            plot_data = plot_function(dataframes, game_name, model_type, max_step=max_step)
+        else:
+            plot_data = plot_function(dataframes, game_name, model_type, max_step=max_step)
         create_plots(plot_data, game_name, best_or_avg, output_dir=None, palette=palette, test_only=test_only, fill_between=fill_between, ax=ax)
 
     mid = len(axs) // 2
@@ -465,6 +474,7 @@ def cli():
     p.add_argument("--output_dir", type=str, default=None)
     p.add_argument("--output_file_name", type=str, default=None)
     p.add_argument("--normalized", action="store_true")
+    p.add_argument("--max_step", type=int, default=None, help="Maximum step to plot (crops x-axis)")
     return p.parse_args()
 
 
@@ -478,10 +488,10 @@ if __name__ == "__main__":
     print('Plotting standalone subgames')
     for game_name in sorted(list(game_names)):
         # Best
-        best_data = prepare_best_data_for_plotting(dataframes, game_name, best_model)
+        best_data = prepare_best_data_for_plotting(dataframes, game_name, best_model, max_step=args.max_step)
         create_plots(best_data, game_name, 'best', args.output_dir, None, args.test_only, args.no_fill_between)
         # Average
-        avg_data = prepare_avg_data_for_plotting(dataframes, game_name, game_model)
+        avg_data = prepare_avg_data_for_plotting(dataframes, game_name, game_model, max_step=args.max_step)
         create_plots(avg_data, game_name, 'avg', args.output_dir, None, args.test_only, args.no_fill_between)
 
     # Models per base game (for subplots)
@@ -496,6 +506,6 @@ if __name__ == "__main__":
         same_game = sorted(list(subgames))
         all_models = sorted(list(base_game_model[base_game]))
         # Best
-        create_subplots(base_game, same_game, dataframes, all_models, best_model, 'best', args.output_dir, args.test_only, args.no_fill_between)
+        create_subplots(base_game, same_game, dataframes, all_models, best_model, 'best', args.output_dir, args.test_only, args.no_fill_between, max_step=args.max_step)
         # Avg
-        create_subplots(base_game, same_game, dataframes, all_models, game_model, 'avg', args.output_dir, args.test_only, args.no_fill_between)
+        create_subplots(base_game, same_game, dataframes, all_models, game_model, 'avg', args.output_dir, args.test_only, args.no_fill_between, max_step=args.max_step)

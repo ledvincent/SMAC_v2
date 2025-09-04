@@ -1305,6 +1305,8 @@ class StarCraft2Env(MultiAgentEnv):
             feature_names.extend(["own_pos_x", "own_pos_y"])
         if self.conic_fov:
             feature_names.extend(["own_fov_x", "own_fov_y"])
+        if self.use_full_feat:
+            feature_names.extend(["own_sight_range", "own_shoot_range", "own_cooldown_norm", "own_cooldown_max"])
         if self.unit_type_bits > 0:
             feature_names.extend(
                 [
@@ -1705,8 +1707,8 @@ class StarCraft2Env(MultiAgentEnv):
                     cd_norm = float(unit.energy) / cd_max
                 else:
                     cd_norm = float(unit.weapon_cooldown) / cd_max
-                own_feats[ind : ind + 3] = [sight_range, shoot_range, cd_norm]
-                ind += 3
+                own_feats[ind : ind + 4] = [sight_range, shoot_range, cd_norm, cd_max]
+                ind += 4
 
             # own_feats[ind] = self.unit_shoot_range(agent_id)
             # ind += 1
@@ -1965,7 +1967,7 @@ class StarCraft2Env(MultiAgentEnv):
         if self.obs_own_pos and self.obs_starcraft:
             own_feats += 2
         if self.use_full_feat and self.obs_starcraft:
-            own_feats += 3 # sight range, shoot range, cooldown
+            own_feats += 4 # sight range, shoot range, cooldown norm, max cooldown
         return own_feats
 
     def get_obs_move_feats_size(self):
