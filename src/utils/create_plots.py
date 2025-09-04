@@ -381,7 +381,7 @@ def create_plots(data, game_name, best_or_avg, output_dir, palette=None, test_on
         new_fig = False
 
     sns.set_theme(style="whitegrid", context="talk")
-    linewidth = 10 / max(1, len(models_to_plot))
+    linewidth = 1.0
 
     model_color = palette_choice(models_to_plot, test_only) if palette is None else palette
 

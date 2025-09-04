@@ -1,7 +1,5 @@
 # This is the default configuration for the SPECTra-QMIX+ algorithm
 
-t_max: 2000000
-
 # use epsilon greedy action selector
 action_selector: "epsilon_greedy"
 epsilon_start: 1.0
