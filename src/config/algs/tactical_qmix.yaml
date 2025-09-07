@@ -1,7 +1,4 @@
-# --- VDN specific parameters ---
-
 # This is the default configuration for the SPECTra-QMIX+ algorithm
-
 
 # use epsilon greedy action selector
 action_selector: "epsilon_greedy"
@@ -18,15 +15,17 @@ batch_size: 128
 target_update_interval: 200
 
 # use the Q_Learner to train
-mac: "custom_controller"
-#agent: "hpn_rnn"
-agent: "att_rnn"
-
+mac: "custom_mac"
+agent: "tactical_rnn"
 hidden_size: 64
 n_head: 4
-agent_output_type: q
+rnn_type: "gru"
+
+# Optional flags
 use_group_card_temp: False
 
+
+agent_output_type: q
 
 learner: "nq_learner"
 mixer: "ss_mixer"
@@ -39,7 +38,7 @@ td_lambda: 0.6
 optimizer: 'adam'
 q_lambda: False
 
-name: "custom_att_qmix"
+name: "tactical_rnn"
 
 obs_agent_id: False # Include the agent's one_hot id in the observation
 obs_last_action: False # Include the agent's last action (one_hot) in the observation

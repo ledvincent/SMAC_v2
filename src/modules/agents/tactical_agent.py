@@ -1,15 +1,15 @@
-import torch
+# modules/agents/tactical_agent.py
+import math
+import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modules.layer.attn_utils import MultiHeadGroupAttn
+from modules.layer.attn_utils import MultiHeadGroupAttn, GroupTemp
 
-# ---------- small utilities ----------
-
+# ---------- utils ----------
 def masked_mean(x, mask, dim):
-    # x: [..., M, D], mask: [..., M] in {0,1}
     eps = 1e-8
-    w = mask.unsqueeze(-1)  # [..., M, 1]
+    w = mask.unsqueeze(-1).to(x.dtype)         # [..., M, 1]
     s = (x * w).sum(dim=dim)
     d = w.sum(dim=dim).clamp_min(eps)
     return s / d
@@ -17,260 +17,175 @@ def masked_mean(x, mask, dim):
 class MLP(nn.Module):
     def __init__(self, in_dim, hidden, out_dim, n_layers=2, dropout=0.0):
         super().__init__()
-        layers = []
-        d = in_dim
-        for i in range(n_layers - 1):
+        layers=[]; d=in_dim
+        for _ in range(n_layers-1):
             layers += [nn.Linear(d, hidden), nn.GELU(), nn.LayerNorm(hidden)]
-            if dropout > 0: layers += [nn.Dropout(dropout)]
+            if dropout>0: layers += [nn.Dropout(dropout)]
             d = hidden
         layers += [nn.Linear(d, out_dim)]
         self.net = nn.Sequential(*layers)
     def forward(self, x): return self.net(x)
 
-class RoleHead(nn.Module):
+# ---------- Agent (HPN-compatible) ----------
+class CAPERNN_ContRoles_HPN(nn.Module):
     """
-    Simple unsupervised role head.
-    Inputs: per-agent fused h0, pooled ally & enemy summaries
-    Output: role logits, role probs, role vector used for conditioning
-    """
-    def __init__(self, d_in, n_roles, use_gumbel=True, tau=1.0):
-        super().__init__()
-        self.use_g = use_gumbel
-        self.tau = tau
-        self.n_roles = n_roles
-        self.mlp = MLP(d_in, hidden=128, out_dim=n_roles, n_layers=2)
+    Forward signature matches HPN controller:
+      inputs = (bs, own_feats, ally_feats, enemy_feats, embedding_indices)
+        own_feats   : [B*N, 1, d_own]
+        ally_feats  : [B*N, Na, d_all]
+        enemy_feats : [B*N, Ne, d_en]
+      hidden_state : [B, N, hidden]  (GRUCell-style like SS_RNNAgent)
 
-    def forward(self, x):
-        logits = self.mlp(x)                              # [B*N, K]
-        probs = F.softmax(logits, dim=-1)
-        if self.training and self.use_g:
-            r = F.gumbel_softmax(logits, tau=self.tau, hard=True, dim=-1)  # straight-through
-        else:
-            # eval: soft or hard; use soft by default to keep gradients smooth if eval runs under no_grad anyway
-            r = probs
-        return logits, probs, r
-
-# ---------- the agent ----------
-
-class CAPERNNAgent(nn.Module):
-    """
-    Capability-Aware, PE-Equivariant RNN agent
-    Interface compatible with SPECTRA/HPN:
-      __init__(input_shape, args)
-      forward(inputs, hidden_state) -> (Q, hidden')
-    Expectation:
-      - 'inputs' is either a tuple (own, allies, enemies, *extras) or a dict with keys.
-      - If flat, we rely on args to slice: n_allies, n_enemies, d_own, d_all, d_en.
+    Returns:
+      Q: [B*N, output_normal_actions + Ne]   (interact head ALWAYS points to enemies)
+      hidden': [B, N, hidden]
     """
     def __init__(self, input_shape, args):
         super().__init__()
-        # ---- args / shapes ----
-        self.d_own   = getattr(args, "d_own", None)
-        self.d_all   = getattr(args, "d_all", None)
-        self.d_en    = getattr(args, "d_en", None)
-        self.n_all   = getattr(args, "n_allies", None)
-        self.n_en    = getattr(args, "n_enemies", None)
-        self.n_move  = getattr(args, "n_move_actions", None)
-        self.n_types = getattr(args, "n_unit_types", 0)    # 0 if unknown/not present
-        self.types_are_last = getattr(args, "unit_type_bits_last", True)  # common in SMAC
-        self.combine_entities = getattr(args, "combine_entities", False)
+        self.args = args
 
-        # core dims
-        self.d_model = getattr(args, "embed_dim", 192)
-        self.hid_rnn = getattr(args, "rnn_hidden_dim", 256)
-        self.n_heads = getattr(args, "attn_heads", 4)
-        self.n_roles = getattr(args, "n_roles", 4)
-        self.role_tau = getattr(args, "role_tau", 1.0)
-        self.use_gumbel = getattr(args, "role_gumbel", True)
+        # Per-entity dims provided by controller
+        own_ctx_dim, enemy_feats_dim, ally_feats_dim = input_shape
+        d_en  = enemy_feats_dim[-1] if isinstance(enemy_feats_dim, (list, tuple)) else enemy_feats_dim
+        d_all = ally_feats_dim[-1]  if isinstance(ally_feats_dim, (list, tuple))  else ally_feats_dim
 
-        # ---- type embedding ----
-        t_dim = getattr(args, "type_emb_dim", 8)
-        if self.n_types > 0:
-            self.type_emb = nn.Embedding(self.n_types, t_dim)
-        else:
-            self.type_emb = None
-            t_dim = 0
+        # HPN/SS_RNNAgent-style flags
+        self.obs_agent_id    = getattr(self.args, "obs_agent_id", False)
+        self.obs_last_action = getattr(self.args, "obs_last_action", False)
 
-        # ---- encoders ----
-        self.enc_self  = MLP((self.d_own or input_shape) + t_dim, self.d_model, self.d_model, n_layers=2)
-        self.enc_ally  = MLP((self.d_all or input_shape) + t_dim, self.d_model, self.d_model, n_layers=2)
-        self.enc_enemy = MLP((self.d_en  or input_shape) + t_dim, self.d_model, self.d_model, n_layers=2)
+        # Core sizes from HPN config (aligns with ss_rnn_agent.py)
+        self.hidden_size = self.args.hidden_size
+        self.n_head      = self.args.n_head
+        self.n_actions   = self.args.n_actions
+        self.n_move      = self.args.output_normal_actions         # normal (non-interact) actions
+        self.role_dim    = getattr(self.args, "role_dim", 8)
 
-        # ---- attention ----
-        self.attn_ally  = MultiHeadGroupAttn(self.d_model, self.n_heads)
-        self.attn_enemy = MultiHeadGroupAttn(self.d_model, self.n_heads)
-        self.fuse = MLP(self.d_model * 3, self.d_model, self.d_model, n_layers=2)  # [self, cA, cE] -> h0
+        # Own feature dimension after optional extras
+        self.own_feats_dim = own_ctx_dim
+        if self.obs_agent_id:    self.own_feats_dim += 1
+        if self.obs_last_action: self.own_feats_dim += 1
+        self.ally_feats_dim  = d_all
+        self.enemy_feats_dim = d_en
 
-        # ---- role head ----
-        # input: h0 || pooled_ally || pooled_enemy
-        self.pool_proj = MLP(self.d_model * 3, 128, 128, n_layers=2)
-        self.role_head = RoleHead(d_in=128, n_roles=self.n_roles, use_gumbel=self.use_gumbel, tau=self.role_tau)
+        # Embeddings
+        self.own_embedding     = nn.Linear(self.own_feats_dim,  self.hidden_size)
+        self.allies_embedding  = nn.Linear(self.ally_feats_dim, self.hidden_size)
+        self.enemies_embedding = nn.Linear(self.enemy_feats_dim,self.hidden_size)
 
-        # ---- RNN ----
-        rnn_in = self.d_model + self.n_roles
-        rnn_type = getattr(args, "rnn_type", "gru").lower()
-        self.rnn_type = rnn_type
-        if rnn_type == "lstm":
-            self.rnn = nn.LSTM(rnn_in, self.hid_rnn, batch_first=True)
-        else:
-            self.rnn = nn.GRU(rnn_in, self.hid_rnn, batch_first=True)
-        self.pre_rnn_ln = nn.LayerNorm(rnn_in)
-        self.post_rnn_ln = nn.LayerNorm(self.hid_rnn)
+        # Group cardinality temperature
+        self.use_group_card_temp = bool(getattr(self.args, "use_group_card_temp", False))
+        if self.use_group_card_temp:
+            self.groupTemp_A = GroupTemp()
+            self.groupTemp_E = GroupTemp()
 
-        # ---- shared trunk for heads ----
-        self.trunk = MLP(self.hid_rnn, self.d_model, self.d_model, n_layers=2)
+        # Separate ally/enemy cross-attn (no geometry priors)
+        self.attn_ally  = MultiHeadGroupAttn(self.hidden_size, self.n_head)
+        self.attn_enemy = MultiHeadGroupAttn(self.hidden_size, self.n_head)
 
-        # ---- movement head ----
-        self.move_head = nn.Linear(self.d_model + self.n_roles, self.n_move)
+        # Fuse own + contexts
+        self.fuse = MLP(self.hidden_size * 3, self.hidden_size, self.hidden_size, n_layers=2)
 
-        # ---- target (shoot) head: pointer-style ----
-        attn_qdim = getattr(args, "target_query_dim", self.d_model)
-        self.q_proj = nn.Linear(self.d_model + self.n_roles, attn_qdim, bias=False)
-        self.k_proj = nn.Linear(self.d_model, attn_qdim, bias=False)
+        # Continuous role embedding (no fixed K)
+        self.pool_proj = MLP(self.hidden_size * 3, 128, 128, n_layers=2)
+        self.role_head = MLP(128, 128, self.role_dim, n_layers=2)
+        self.role_ln   = nn.LayerNorm(self.role_dim)
+        self.gating_alpha = getattr(self.args, "gating_alpha", 1.0)
 
-        # buffers for debug (optional)
-        self.register_buffer("_dummy", torch.zeros(1), persistent=False)
-        self.last_role_probs = None  # for external logging if you want
+        # GRUCell core (HPN baseline style)
+        self.rnn = nn.GRUCell(self.hidden_size + self.role_dim, self.hidden_size)
 
-    # --------- helpers to parse and embed types ---------
+        # Heads
+        self.normal_actions_net = nn.Linear(self.hidden_size, self.n_move)  # q_normal
+        # Pointer interact head: queries from (hidden+role), keys from ENEMIES ONLY
+        self.q_proj = nn.Linear(self.hidden_size + self.role_dim, self.hidden_size, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size,               self.hidden_size, bias=False)
 
-    def _get_type_emb(self, x, n_types):
-        if n_types <= 0 or self.type_emb is None:
-            return torch.zeros(*x.shape[:-1], 0, device=x.device, dtype=x.dtype)
-        # assume type one-hot is at the end of the feature vector for that entity
-        onehot = x[..., -n_types:] if self.types_are_last else x[..., :n_types]
-        idx = onehot.argmax(dim=-1).clamp(min=0)  # [..]
-        return self.type_emb(idx)                 # [.., t_dim]
+        # Side channel for learner regularizers
+        self.register_buffer("_dummy", th.zeros(1), persistent=False)
+        self.last_role_embed = None  # [B*N, role_dim]
 
-    def _split_inputs(self, inputs):
-        """
-        Returns own [B*N, 1, d_own], allies [B*N, Na, d_all], enemies [B*N, Ne, d_en]
-        This function supports tuple or dict. If flat, you'll need to adapt to your layout.
-        """
-        if isinstance(inputs, (list, tuple)):
-            # Common SPECTRA/HPN: (own, allies, enemies, *extras)
-            own   = inputs[0]  # [B*N, 1, d_own] or [B, N, 1, d_own]
-            allies= inputs[1]  # [B*N, Na, d_all] or [B, N, Na, d_all]
-            enemies=inputs[2]  # [B*N, Ne, d_en]  or [B, N, Ne, d_en]
-        elif isinstance(inputs, dict):
-            own, allies, enemies = inputs["own"], inputs["allies"], inputs["enemies"]
-        else:
-            raise ValueError("Unsupported input structure; pass (own, allies, enemies, ...) or dict.")
-
-        # collapse [B, N, ...] to [B*N, ...] if needed
-        def collapse(x):
-            if x.dim() == 4:  # [B, N, M, D]
-                B, N, M, D = x.shape
-                return x.view(B * N, M, D)
-            elif x.dim() == 3:  # [B*N, M, D]
-                return x
-            else:
-                raise ValueError("Unexpected input dims.")
-        own    = collapse(own)
-        allies = collapse(allies)
-        enemies= collapse(enemies)
-        return own, allies, enemies
-
-    # --------- forward ---------
+    def init_hidden(self):
+        # Same convention as ss_rnn_agent: [1, hidden] zeros
+        return self.own_embedding.weight.new(1, self.hidden_size).zero_()
 
     def forward(self, inputs, hidden_state):
         """
-        inputs: (own, allies, enemies, *extras) with shapes collapsed to [B*N, M, D] or [B, N, M, D]
-        hidden_state: [B*N, H] for GRU, or tuple for LSTM
-        returns: (Q, hidden')
-          Q shape: [B*N, A_move + Ne]
+        inputs: (bs, own_feats, ally_feats, enemy_feats, embedding_indices)
+        hidden_state: [B, N, H]
         """
-        device = self._dummy.device
-        own, allies, enemies = self._split_inputs(inputs)
+        bs, own_feats, ally_feats, enemy_feats, embedding_indices = inputs
+        device = own_feats.device
 
-        BN = own.size(0)
-        Na = allies.size(1)
-        Ne = enemies.size(1)
+        BN = own_feats.shape[0]       # B*N
+        Na = ally_feats.shape[1]
+        Ne = enemy_feats.shape[1]
+        n_agents = Na + 1
 
-        # masks from zero-padding (sum(abs) > 0)
-        ally_mask = (allies.abs().sum(dim=-1) > 0).to(own.dtype)  # [BN, Na]
-        enemy_mask= (enemies.abs().sum(dim=-1) > 0).to(own.dtype) # [BN, Ne]
+        # Masks from zero padding
+        own_mask   = ~th.all(own_feats == 0, dim=-1)       # [BN, 1]
+        ally_mask  = ~th.all(ally_feats == 0, dim=-1)      # [BN, Na]
+        enemy_mask = ~th.all(enemy_feats == 0, dim=-1)     # [BN, Ne]
 
-        # --- type embeddings and encoders ---
-        # own is [BN, 1, d_own] -> squeeze to [BN, d_own] for per-agent enc
-        own_flat = own.squeeze(1)                                  # [BN, d_own]
-        t_self = self._get_type_emb(own_flat, self.n_types)        # [BN, t_dim]
-        self_emb = self.enc_self(torch.cat([own_flat, t_self], dim=-1))  # [BN, D]
+        # Append agent_id / last_action if configured (same as ss_rnn_agent)
+        if self.obs_agent_id and embedding_indices and embedding_indices[0] is not None:
+            agent_indices = embedding_indices[0].reshape(-1, 1, 1)  # [B*N,1,1]
+            own_feats = th.cat((own_feats, agent_indices), dim=-1)
+        if self.obs_last_action and embedding_indices and embedding_indices[-1] is not None:
+            last_action_indices = embedding_indices[-1].reshape(-1, 1, 1)  # [B*N,1,1]
+            own_feats = th.cat((own_feats, last_action_indices), dim=-1)
 
-        # allies/enemies
-        t_ally = self._get_type_emb(allies, self.n_types)          # [BN, Na, t_dim]
-        t_enemy= self._get_type_emb(enemies, self.n_types)         # [BN, Ne, t_dim]
-        ally_emb = self.enc_ally(torch.cat([allies, t_ally], dim=-1))    # [BN, Na, D]
-        enemy_emb= self.enc_enemy(torch.cat([enemies, t_enemy], dim=-1)) # [BN, Ne, D]
+        # Embed entities
+        own_e   = self.own_embedding(own_feats)       # [BN, 1, H]
+        ally_e  = self.allies_embedding(ally_feats)   # [BN, Na, H]
+        enemy_e = self.enemies_embedding(enemy_feats) # [BN, Ne, H]
 
-        # --- cross-attention ---
-        if self.combine_entities:
-            # Concatenate sets; share the enemy key/value projection (ally & enemy encoders already separate)
-            set_emb  = torch.cat([ally_emb, enemy_emb], dim=1)               # [BN, Na+Ne, D]
-            set_mask = torch.cat([ally_mask, enemy_mask], dim=1)             # [BN, Na+Ne]
-            c_set = self.attn_enemy(self_emb.unsqueeze(1), set_emb, set_mask)  # reuse module, OK
-            cA, cE = c_set, c_set
-        else:
-            cA = self.attn_ally(self_emb.unsqueeze(1), ally_emb, ally_mask)    # [BN, D]
-            cE = self.attn_enemy(self_emb.unsqueeze(1), enemy_emb, enemy_mask) # [BN, D]
+        # Group temps for cardinality neutralization
+        temp_A = temp_E = None
+        if self.use_group_card_temp:
+            # all [BN]
+            temp_A = self.groupTemp_A(ally_mask.float().sum(-1))
+            temp_E = self.groupTemp_E(enemy_mask.float().sum(-1))
 
-        # --- fuse ---
-        h0 = self.fuse(torch.cat([self_emb, cA, cE], dim=-1))                 # [BN, D]
+        # Single-query (own) cross-attention
+        self_emb = own_e[:, 0]  # [BN, H]
+        cA, _ = self.attn_ally (self_emb, ally_e,  ally_mask,  group_temp=temp_A)
+        cE, _ = self.attn_enemy(self_emb, enemy_e, enemy_mask, group_temp=temp_E)
 
-        # --- pooled summaries for role head ---
-        pA = masked_mean(ally_emb, ally_mask, dim=1) if Na > 0 else torch.zeros(BN, self.d_model, device=device)
-        pE = masked_mean(enemy_emb, enemy_mask, dim=1) if Ne > 0 else torch.zeros(BN, self.d_model, device=device)
-        pooled = self.pool_proj(torch.cat([self_emb.unsqueeze(1), pA.unsqueeze(1), pE.unsqueeze(1)], dim=1).reshape(BN, -1))
+        # Fuse & pooled summaries (for role)
+        h0 = self.fuse(th.cat([self_emb, cA, cE], dim=-1))                 # [BN, H]
+        pA = masked_mean(ally_e,  ally_mask,  dim=1) if Na > 0 else th.zeros(BN, self.hidden_size, device=device)
+        pE = masked_mean(enemy_e, enemy_mask, dim=1) if Ne > 0 else th.zeros(BN, self.hidden_size, device=device)
+        pooled = self.pool_proj(th.cat([self_emb, pA, pE], dim=-1))        # [BN, 128]
 
-        # --- roles ---
-        role_logits, role_probs, r = self.role_head(pooled)                   # [BN, K] each
-        self.last_role_probs = role_probs.detach()
+        # Continuous role embedding r
+        r = th.tanh(self.role_head(pooled))                                # [BN, R]
+        r = self.role_ln(r)
+        self.last_role_embed = r.detach()
 
-        # --- recurrent core ---
-        rnn_in = torch.cat([h0, r], dim=-1).unsqueeze(1)                      # [BN, 1, D+K]
-        rnn_in = self.pre_rnn_ln(rnn_in)
-        if self.rnn_type == "lstm":
-            if hidden_state is None:
-                h0_rnn = torch.zeros(1, BN, self.hid_rnn, device=device)
-                c0_rnn = torch.zeros(1, BN, self.hid_rnn, device=device)
-                hidden_state = (h0_rnn, c0_rnn)
-            out, new_hidden = self.rnn(rnn_in, hidden_state)
-        else:
-            if hidden_state is None:
-                h0_rnn = torch.zeros(1, BN, self.hid_rnn, device=device)
-            else:
-                h0_rnn = hidden_state
-            out, new_hidden = self.rnn(rnn_in, h0_rnn)                        # out: [BN, 1, H]
-        h1 = self.post_rnn_ln(out.squeeze(1))                                  # [BN, H]
+        # GRUCell (per agent)
+        h_prev = hidden_state.reshape(-1, self.hidden_size)                # [B*N, H]
+        rnn_in = th.cat([h0, self.gating_alpha * r], dim=-1)               # [BN, H+R]
+        h_cur  = self.rnn(rnn_in, h_prev)                                  # [BN, H]
 
-        # --- shared trunk ---
-        z = self.trunk(h1)                                                     # [BN, D]
+        # Heads
+        # (1) normal actions
+        q_normal = self.normal_actions_net(h_cur).unsqueeze(1)             # [BN,1,A_norm]
 
-        # --- movement head (condition on role) ---
-        z_move = torch.cat([z, r], dim=-1)                                     # [BN, D+K]
-        Q_move = self.move_head(z_move)                                         # [BN, A_move]
-        # center (dueling-style)
-        Q_move = Q_move - Q_move.mean(dim=-1, keepdim=True)
-
-        # --- target head (pointer to enemies, no geometry bias) ---
-        # build queries/keys and masked dot-product
-        z_shoot = torch.cat([z, r], dim=-1)                                     # [BN, D+K]
-        q = self.q_proj(z_shoot)                                                # [BN, Dq]
+        # (2) interact head -> enemies ONLY
         if Ne > 0:
-            k = self.k_proj(enemy_emb)                                          # [BN, Ne, Dq]
-            logits = torch.einsum('bd,bmd->bm', q, k) / (q.size(-1) ** 0.5)     # [BN, Ne]
-            # mask out invalid enemies
-            logits = logits.masked_fill(enemy_mask == 0, float('-inf'))
-            Q_shoot = logits
-            # center over valid targets
-            # (replace -inf with very small before mean)
-            masked = torch.where(enemy_mask.bool(), Q_shoot, torch.zeros_like(Q_shoot))
-            denom = enemy_mask.sum(dim=-1, keepdim=True).clamp_min(1)
+            q_vec = self.q_proj(th.cat([h_cur, self.gating_alpha * r], dim=-1)).unsqueeze(1)  # [BN,1,H]
+            k_vec = self.k_proj(enemy_e)                                                      # [BN,Ne,H]
+            logits = th.einsum("bij,bmj->bim", q_vec, k_vec) / math.sqrt(q_vec.size(-1))      # [BN,1,Ne]
+            logits = logits.masked_fill(enemy_mask.unsqueeze(1) == 0, float("-inf"))
+            # center over valid enemies to stabilize scales
+            masked = th.where(enemy_mask.unsqueeze(1), logits, th.zeros_like(logits))
+            denom  = enemy_mask.sum(dim=-1, keepdim=True).clamp_min(1).unsqueeze(1)
             mean_valid = masked.sum(dim=-1, keepdim=True) / denom
-            Q_shoot = Q_shoot - mean_valid
+            q_interact = logits - mean_valid                                                  # [BN,1,Ne]
         else:
-            Q_shoot = torch.zeros(BN, 0, device=device)
+            q_interact = th.zeros(BN, 1, 0, device=device)
 
-        # --- final Q: concat movement then shoot actions ---
-        Q = torch.cat([Q_move, Q_shoot], dim=-1)                                # [BN, A_move + Ne]
-        return Q, new_hidden
+        # Final Q and new hidden
+        Q = th.cat([q_normal, q_interact], dim=-1).squeeze(1)              # [BN, A_norm + Ne]
+        h_out = h_cur.view(bs, n_agents, self.hidden_size)                 # [B, N, H]
+        return Q, h_out

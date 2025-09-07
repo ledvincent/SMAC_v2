@@ -6,7 +6,7 @@ import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-from modules.layer.attn_utils import ConditionalLayerNorm, MultiHeadGroupAttn, GroupTemp, GeomPrior
+from modules.layer.attn_utils import MultiHeadGroupAttn, GroupTemp
 
 # ------------------------------- agent -------------------------------
 
@@ -14,123 +14,76 @@ class CustomAtt_RNNAgent(nn.Module):
     def __init__(self, input_shape, args):
         super().__init__()
         self.args = args
-        self.hidden_size = int(getattr(args, "hidden_size", 64))
-        self.n_heads = int(getattr(args, "n_head", 4))
-        self.output_normal_actions = args.output_normal_actions
+        self.n_agents = args.n_agents
+        self.n_allies = args.n_allies
+        self.n_enemies = args.n_enemies
+        self.n_actions = args.n_actions
+        self.n_heads = args.hpn_head_num
+        self.hidden_dim = H = args.hidden_dim
 
-        # Flags
-        self.use_group_card_temp  = bool(getattr(args, "use_group_card_temp", True))
-        self.prototype_movement   = bool(getattr(args, "prototype_movement", True))
-        self.hs_query             = bool(getattr(args, "hs_query", True))
-        self.use_cln              = bool(getattr(args, "use_cln", True))
-        self.use_shoot_prior      = bool(getattr(args, "use_shoot_prior", False))
-        self.use_zE_pointer_resid = bool(getattr(args, "use_zE_pointer_resid", True))
-        self.use_tau_shoot_mod    = bool(getattr(args, "use_tau_shoot_mod", True))
-        self.use_refine_shoot     = bool(getattr(args, "use_refine_shoot", False))
-
-        # Parse input dims (SPECTRA convention)
         self.own_feats_dim, self.enemy_feats_dim, self.ally_feats_dim = input_shape
         self.enemy_feats_dim = self.enemy_feats_dim[-1]
         self.ally_feats_dim = self.ally_feats_dim[-1]
-        if getattr(args, "obs_agent_id", False):
-            self.own_feats_dim += 1
-        if getattr(args, "obs_last_action", False):
-            self.own_feats_dim += 1
+        self.output_normal_actions = self.args.output_normal_actions
+        
+        # Optional flags
+        self.use_group_card_temp = bool(getattr(args, "use_group_card_temp", False))
+        self.use_bias = bool(getattr(args, "use_bias", False))
 
-        H = self.hidden_size
+        if self.args.obs_agent_id:
+            self.own_feats_dim += 1
+        if self.args.obs_last_action:
+            self.own_feats_dim += 1
 
         # Embeddings
-        self.embed_own   = nn.Linear(self.own_feats_dim, H)
-        self.embed_ally  = nn.Linear(self.ally_feats_dim, H)
-        self.embed_enemy = nn.Linear(self.enemy_feats_dim, H)
+        hyper_out_dim = (self.own_feats_dim * H) + H + 4
+        if self.use_bias: hyper_out_dim += 1
+        self.hyper_own = nn.Sequential(
+            nn.Linear(self.own_feats_dim, H),
+            nn.ReLU(inplace=True),
+            nn.Linear(H, hyper_out_dim))
 
-        # Grouped single‑query multi‑head cross‑attention (ally/enemy)
-        self.grp_attn_allies  = MultiHeadGroupAttn(H, self.n_heads)
-        self.grp_attn_enemies = MultiHeadGroupAttn(H, self.n_heads)
-
-        # Post‑attn conditional norm on summaries
-        self.cln_A = ConditionalLayerNorm(H)
-        self.cln_E = ConditionalLayerNorm(H)
-
-        # Recurrent core
-        self.gru   = nn.GRUCell(3*H, H)
-        self.pre_ln = nn.LayerNorm(H)
-
-        # Family calibration
-        self.V_head    = nn.Linear(H, 1)    # shared baseline for qvalues (helps relative scaling)
-        self.type_bias = nn.Linear(H, 2)    # [b_move, b_shoot]
-        self.log_tau_move  = nn.Parameter(th.zeros(1))
-        self.log_tau_shoot = nn.Parameter(th.zeros(1))
-
-        # Movement head: prototype attention (PI) or MLP
-        if self.prototype_movement:
-            self.W_move_q = nn.Linear(H, H)
-            self.prototypes = nn.Parameter(th.randn(self.output_normal_actions, H) * (1.0 / math.sqrt(H)))
-        else:
-            self.move_head = nn.Sequential(nn.Linear(H, H), nn.ReLU(inplace=True), nn.Linear(H, self.output_normal_actions))
-
-        # Shooting head: pointer (Query‑Key) **enemies only**
-        self.Wq_shoot = nn.Linear(H, H)
-        self.Wk_enemy = nn.Linear(H, H)
-
-        # ------------------- OPTIONAL FLAGS -------------------
-
-        # Conditions the query on previous hidden state
-        if self.hs_query:
-            # residual correction from hidden state (starts as no-op)
-            self.q_resid = nn.Linear(H, H, bias=False)
-            nn.init.zeros_(self.q_resid.weight)
-            # tiny gate driven by h_prev (starts ~0, so own-only at init)
-            self.q_gate = nn.Linear(H, 1)
-            nn.init.zeros_(self.q_gate.weight)
-            nn.init.constant_(self.q_gate.bias, -4.0)  # sigmoid(-4) ~ 0.018
+        self.enemy_embedding = nn.Linear(self.enemy_feats_dim, self.hidden_dim)
+        self.ally_embedding = nn.Linear(self.ally_feats_dim, self.hidden_dim)
 
         # Group cardinality temperature
         if self.use_group_card_temp:
             self.groupTemp_A = GroupTemp()
             self.groupTemp_E = GroupTemp()
 
-        # Layer norm
-        self.q_ln   = nn.LayerNorm(H)
-        self.inp_ln = nn.LayerNorm(3*H)
+        # Separate or combined ally/enemy cross-attn (no geometry priors)
+        self.use_combined_attn = bool(getattr(args, "use_combined_attn", False))
+        if self.use_combined_attn:
+            self.cross_attn = MultiHeadGroupAttn(H, self.n_heads)
+        else:
+            self.cross_attn_ally  = MultiHeadGroupAttn(H, self.n_heads)
+            self.cross_attn_enemy = MultiHeadGroupAttn(H, self.n_heads)
 
-        # let enemy context tweak shooting tau (zero-init)
-        if self.use_tau_shoot_mod:
-            self.tau_shoot_mod = nn.Linear(H, 1)
-            nn.init.zeros_(self.tau_shoot_mod.weight)
-            nn.init.zeros_(self.tau_shoot_mod.bias)
+        # GRU
+        self.gru = nn.GRUCell(3*H, H)
 
-        # query residual from enemy summary (zero-init)
-        if self.use_zE_pointer_resid:
-            self.q_shoot_resid = nn.Linear(H, H, bias=False)
-            nn.init.zeros_(self.q_shoot_resid.weight)
-            self.q_shoot_gate  = nn.Linear(H, 1)
-            nn.init.zeros_(self.q_shoot_gate.weight)
-            nn.init.constant_(self.q_shoot_gate.bias, -4.0)
+        # Movements heads
+        self.q_move = nn.Linear(H, self.A_move)
 
-        # decision-level geometry prior (recommended)
-        if self.use_shoot_prior:
-            self.shoot_prior = GeomPrior(
-                tanh_c=getattr(args, "prior_tanh_c", 4.0),
-                use_hp=getattr(args, "obs_all_health", True),
-                use_shield=getattr(args, "obs_all_health", True),
-                not_shootable_push=getattr(args, "prior_no_shoot_push", 2.0),
+        # Shoot heads
+        self.z_to_K = nn.Linear(H, H, bias=False)
+        self.E_to_K = nn.Linear(H, H, bias=False)
+
+        # (Optional) FiLM from aggregated enemy context
+        if self.use_film:
+            self.film = nn.Sequential(
+                nn.Linear(H, H), nn.ReLU(inplace=True),
+                nn.Linear(H, 2*H)  # splits to gamma, beta
             )
-            self.prior_gate = nn.Linear(H, 1)
-            nn.init.zeros_(self.prior_gate.weight)
-            nn.init.constant_(self.prior_gate.bias, -4.0)
-            self.log_prior_scale = nn.Parameter(th.zeros(1))
-
-        # optional: refine per-enemy scores (cheap)
-        if self.use_refine_shoot:
-            self.ptr_mlp = nn.Sequential(
-                nn.Linear(4 * H + 1, H),
-                nn.ReLU(inplace=True),
-                nn.Linear(H, 1),
-            )
+        
+        # Nice-to-have init: keep hyper calibration near neutral
+        with th.no_grad():
+            # last linear initially zeros → calib/prior start neutral (we still get nonzero W,b from first layer)
+            self.hyper_own[-1].weight.mul_(0.01)
+            self.hyper_own[-1].bias.zero_()
 
     def init_hidden(self):
-        return self.embed_own.weight.new_zeros(1, self.hidden_size)
+        return None
 
     # ------------------------------ forward ----------------------------
 
@@ -162,97 +115,54 @@ class CustomAtt_RNNAgent(nn.Module):
             last_act = embedding_indices[-1].reshape(-1, 1, 1)
             own_raw = th.cat([own_raw, last_act], dim=-1)
 
-        # Embeddings
-        e_own = self.embed_own(own_raw)                   # [Bn,1,H]
-        A = self.embed_ally(ally_raw)                     # [Bn,nA,H]
-        E = self.embed_enemy(enemy_raw)                   # [Bn,nE,H]
+        # ----- Hypernet slices -----
+        own_vec = own_raw.squeeze(1)                      # [Bn, D_own]
+        h_out   = self.hyper_own(own_vec)                 # [Bn, hyper_out_dim]
 
-        # (OPTIONAL) Hidden-state–conditioned query (state‑aware attention)
-        q_own = e_own.squeeze(1)                   # [Bn, H]
-        h_prev = hidden_state.reshape(-1, H)       # [Bn, H]
-        if self.hs_query:
-            has_state = (h_prev.abs().sum(dim=-1, keepdim=True) > 0).float() # 0 at t=0
-            g = th.sigmoid(self.q_gate(h_prev)) * has_state  # [Bn,1]
-            q_src = q_own + g * self.q_resid(h_prev)   # residual correction only
-        else:
-            q_src = q_own
+        # W_own, b_own
+        w_len = self.own_feats_dim * H
+        W_flat = h_out[:, :w_len]
+        b_own  = h_out[:, w_len:w_len+H]
+        off    = w_len + H
+        
+        # Ally/Enemy Embeddings
+        ally_e = self.ally_embedding(ally_raw)                  # [Bn, Na, H]
+        enemy_e = self.enemy_embedding(enemy_raw)               # [Bn, Ne, H]
 
-        # (OPTIONAL) Group temps for cardinality neutralization
+        # Group temps for cardinality neutralization
         temp_A = temp_E = None
         if self.use_group_card_temp:
             # all [Bn]
             temp_A = self.groupTemp_A(ally_mask.float().sum(-1))
             temp_E = self.groupTemp_E(enemy_mask.float().sum(-1))
 
-        # Grouped cross‑attention (ally/enemy)
-        # Summary of cross-attention between query (own_context) and group (allies/enemies)
-        # both of [Bn,H] shape
-        zA, _ = self.grp_attn_allies(q_src, A, ally_mask, group_temp=temp_A)
-        zE, _ = self.grp_attn_enemies(q_src, E, enemy_mask, group_temp=temp_E)
+        # Single-query (own) cross-attention
+        zA, _ = self.cross_attn_ally(own_e, ally_e, ally_mask, group_temp=temp_A)
+        zE, _ = self.cross_attn_enemy(own_e, enemy_e, enemy_mask, group_temp=temp_E)
 
-        # Post‑attn conditional modulation of summaries
-        if self.use_cln:
-            zA = self.cln_A(zA, q_own)
-            zE = self.cln_E(zE, q_own)
+        # FiLM on per-enemy features using aggregated enemy context
+        if self.use_film:
+            gamma, beta = self.film(zE).chunk(2, dim=-1)       # each [Bn, H]
+            # small bounded modulation for stability
+            gamma, beta = th.tanh(gamma)*0.1, th.tanh(beta)*0.1
+            enemy_e = enemy_e * (1+gamma.unsqueeze(1)) + beta.unsqueeze(1)
 
-        # Normalize q_src (keep scales comparable)
-        qn = self.q_ln(q_src)
-        u_cat = th.cat([qn, zA, zE], dim=-1)     # [Bn,3H]
-        u_cat = self.inp_ln(u_cat)  # Normalize before GRU
+        # Recurrent core
+        u_cat = th.cat([own_e, zA, zE], dim=-1)                 # [Bn, 3H]
+        z = self.gru(u_cat, hidden_state)                         # [Bn, H]
 
-        # GRU update (attention -> GRU, like SPECTRA)
-        h = self.gru(u_cat, h_prev)                           # [Bn,H]
-        hidden_out = h.view(bs, -1, H)
+        # Heads
+        # Movements
+        logits_move = self.q_move(z)                                  # [Bn, A_move]
 
-        # Family calibration parts
-        V = self.V_head(h)                                   # [Bn,1]
-        b_move, b_shoot = self.type_bias(h).chunk(2, dim=-1) # [Bn, 1] x2 family bias
-        tau_move  = th.exp(self.log_tau_move ) + 1e-6
-        tau_shoot = th.exp(self.log_tau_shoot) + 1e-6
+        # Shooting (per-enemy bilinear)
+        zk = self.z_to_K(z)                                      # [Bn, H]
+        Ek = self.E_to_K(enemy_e)                                # [Bn, Ne, H]
+        logits_shoot = th.einsum("bd,bmd->bm", zk, Ek)                 # [Bn, Ne]
 
-        # (OPTIONAL) let the enemy context tweak shooting temp (zero-init; safe)
-        if self.use_tau_shoot_mod:
-            tau_shoot = tau_shoot * (1.0 + 0.1 * th.tanh(self.tau_shoot_mod(zE)))  # [Bn,1]
+        # Mask invalid enemies
+        # logits_shoot = logits_shoot.masked_fill(~enemy_mask, float('-inf'))
 
-        # ---------------- Movement head ----------------
-        if self.prototype_movement:
-            q_mv = self.W_move_q(h)                       # [Bn,H]
-            logits_move  = F.linear(q_mv, self.prototypes) / math.sqrt(H)  # [Bn, A_move]
-        else:
-            logits_move  = self.move_head(h)                               # [Bn, A_move]
-        
-        A_move = logits_move  - logits_move.mean(dim=-1, keepdim=True)
-        Q_move = (V + b_move + (A_move / tau_move))                   # [Bn, A_move]
-
-        # ---------------- Shooting head ----------------
-        q_sh = self.Wq_shoot(h)                           # [Bn,H]
-
-        if self.use_zE_pointer_resid:
-            q_sh = q_sh + th.sigmoid(self.q_shoot_gate(h)) * self.q_shoot_resid(zE)
-
-        K_enemy = self.Wk_enemy(E)                        # [Bn,nE,H]
-        a = th.einsum("bh,bnh->bn", q_sh, K_enemy) / math.sqrt(H)  # [Bn,nE]
-
-        # Decision-level geometry prior
-        if self.use_shoot_prior:
-            s = self.shoot_prior(enemy_raw, enemy_mask)            # [Bn,nE]
-            den_s = enemy_mask.float().sum(1, keepdim=True).clamp(min=1.0)
-            s = s - (s * enemy_mask.float()).sum(1, keepdim=True) / den_s
-            a = a + th.sigmoid(self.prior_gate(h)) * th.exp(self.log_prior_scale) * s
-
-        if self.use_refine_shoot:
-            h_rep = h.unsqueeze(1).expand(-1, nE, -1)
-            feats = th.cat([h_rep, E, h_rep*E, (h_rep - E).abs(), a.unsqueeze(-1)], dim=-1)
-            a = self.ptr_mlp(feats).squeeze(-1)          # [Bn,nE]
-
-        # Center within valid enemies
-        den_e = enemy_mask.float().sum(dim=1, keepdim=True).clamp(min=1.0)
-        mean_e = (a * enemy_mask.float()).sum(dim=1, keepdim=True) / den_e
-        a = a - mean_e
-        very_neg = th.finfo(a.dtype).min        # most negative finite number representable in that dtype
-        a = a.masked_fill(~enemy_mask, very_neg)
-        Q_shoot = (V + b_shoot + (a / tau_shoot))         # [Bn,nE]
-
-        # Final concat with movement
-        Q = th.cat([Q_move, Q_shoot], dim=-1).unsqueeze(1)  # [Bn,1, A_move + nE]
-        return Q, hidden_out
+        # Final Q and new hidden
+        Q = th.cat([logits_move, logits_shoot], dim=-1).unsqueeze(1)  # [Bn,1,A_move+Ne]
+        return Q, z.view(bs, -1, H)

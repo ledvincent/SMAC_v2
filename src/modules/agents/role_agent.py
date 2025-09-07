@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from modules.layer.attention import TypedMultiHeadAttention
+from modules.layer.attn_utils import MultiHeadGroupAttn
 
 class TypeAwareAgent(nn.Module):
     def __init__(self, args):
