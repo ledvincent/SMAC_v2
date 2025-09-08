@@ -74,6 +74,10 @@ class MultiHeadGroupAttn(nn.Module):
         ctx = ctx.reshape(B, H)                  # [B,H=n_heads*head_dim]
         return self.out(ctx), attn      # ([B,H], [B,n_heads,N])
 
+class SetAttentionBlock(nn.Module):
+    '''Compute attention between two sets of features.'''
+    def __init__(self, hidden_dim, n_heads):
+
 class ConditionalLayerNorm(nn.Module):
     def __init__(self, hidden):
         super().__init__()
