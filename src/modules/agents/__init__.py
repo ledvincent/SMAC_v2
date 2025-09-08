@@ -8,6 +8,7 @@ from .ss_rnn_agent import SS_RNNAgent
 from .att_agent import CustomAtt_RNNAgent
 from .bias_agent import MHA_QAgent
 from .tactical_agent import CAPERNN_ContRoles_HPN
+from .role_agent import RoleEmergentAgent
 
 REGISTRY["rnn"] = RNNAgent
 REGISTRY["hpn_rnn"] = HPN_RNNAgent
@@ -17,3 +18,4 @@ REGISTRY["ss_rnn"] = SS_RNNAgent
 REGISTRY["att_rnn"] = CustomAtt_RNNAgent
 REGISTRY["bias_agent"] = MHA_QAgent
 REGISTRY["tactical_rnn"] = CAPERNN_ContRoles_HPN
+REGISTRY["role_rnn"] = RoleEmergentAgent
