@@ -75,8 +75,37 @@ class MultiHeadGroupAttn(nn.Module):
         return self.out(ctx), attn      # ([B,H], [B,n_heads,N])
 
 class SetAttentionBlock(nn.Module):
-    '''Compute attention between two sets of features.'''
-    def __init__(self, hidden_dim, n_heads):
+    def __init__(self, q_hidden_dim: int, k_hidden_dim: int, hidden_dim: int, n_heads: int):
+        super().__init__()
+        assert hidden_dim % n_heads == 0, "hidden_dim must be divisible by n_heads"
+        self.H = hidden_dim
+        self.n_heads = n_heads
+        self.head_dim = hidden_dim // n_heads
+
+        # Project to shared space H
+            
+        self.project_keys    = nn.Linear(k_hidden_dim, hidden_dim)
+
+    def forward(self, queries: th.Tensor, keys: th.Tensor) -> th.Tensor:
+        # queries: [B, N, q_hidden_dim], keys: [B, M, k_hidden_dim]
+        B, N, _ = queries.shape
+        M = keys.shape[1]
+        h, p = self.n_heads, self.head_dim
+
+        # Linear projections -> [B, N, H], [B, M, H]
+        Q = self.project_queries(queries)
+        K = self.project_keys(keys)
+
+        # Split into heads -> [B, h, N, p], [B, h, M, p]
+        Q = Q.view(B, N, h, p).permute(0, 2, 1, 3).contiguous()
+        K = K.view(B, M, h, p).permute(0, 2, 1, 3).contiguous()
+
+        # Scaled dot-product per head: [B, h, N, p] x [B, h, p, M] -> [B, h, N, M]
+        scores_h = th.matmul(Q, K.transpose(-1, -2)) / (p ** 0.5)
+
+        # Average over heads -> [B, N, M]
+        scores = scores_h.mean(dim=1)
+        return scores
 
 class ConditionalLayerNorm(nn.Module):
     def __init__(self, hidden):

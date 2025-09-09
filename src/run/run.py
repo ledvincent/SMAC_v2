@@ -1,3 +1,20 @@
+# --- MUST be the first lines of run.py ---
+import os, multiprocessing as mp
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn", force=True)
+
+# Optional: if you use torch.multiprocessing elsewhere
+try:
+    import torch.multiprocessing as tmp
+    if tmp.get_start_method(allow_none=True) != "spawn":
+        tmp.set_start_method("spawn", force=True)
+except Exception:
+    pass
+
 import datetime
 import os
 import pprint

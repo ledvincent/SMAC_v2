@@ -16,7 +16,13 @@ class CustomMAC(BasicMAC):
 
         # For auxiliary losses (role-specific)
         self._aux_cache = defaultdict(list)
-        
+
+    def init_hidden(self, batch_size, n_agents=None):
+        # normal hidden init
+        super().init_hidden(batch_size, n_agents)
+        # IMPORTANT: clear any stale aux from previous runs/batches
+        self._aux_cache.clear()
+
     # Add new func
     def _get_obs_component_dim(self, test_mode):
         move_feats_dim, enemy_feats_dim, ally_feats_dim, own_feats_dim = self.args.obs_component # [4, (20, 5), (19, 5), 1]  
@@ -40,6 +46,8 @@ class CustomMAC(BasicMAC):
         ally_feats = ally_feats.contiguous().view(bs * self.n_agents, self.n_allies, -1)
         enemy_feats = enemy_feats.contiguous().view(bs * self.n_agents, self.n_enemies, -1)
         
+        num_actions = batch["avail_actions"].size(-1)
+
         embedding_indices = []
         if self.args.obs_agent_id:
             embedding_indices.append(th.arange(self.n_agents, device=batch.device).unsqueeze(0).expand(bs, -1) / self.n_agents)
@@ -49,10 +57,9 @@ class CustomMAC(BasicMAC):
                 embedding_indices.append(last_actions)
             else:
                 last_actions = batch["actions"][:, t - 1].squeeze(-1)
-                embedding_indices.append(last_actions / len(last_actions[0]))
+                embedding_indices.append(last_actions / max(1, num_actions - 1))
         # returns [bs], [bs*n_agents, 1, own_feats_dim], [b*n_agents, n_allies, ally_feats_dim], [bs*n_agents, n_enemies, enemy_feats_dim], [bs, n_agents]
         return bs, own_feats, ally_feats, enemy_feats, embedding_indices
-    
 
     def forward(self, batch, t: int, test_mode: bool = False):
         # Build inputs exactly as you already do
@@ -62,15 +69,31 @@ class CustomMAC(BasicMAC):
         # Call the agent
         agent_outs, self.hidden_states, info = self.agent(inputs, self.hidden_states)
 
-        # agent_outs: [Bn, 1, A]  -> reshape to [bs, n_agents, A] for the learner
+        # Normalize agent_outs to [Bn, 1, A] then reshape to [bs, n_agents, A]
+        if agent_outs.dim() == 2:
+            # [Bn, A] -> [Bn, 1, A]
+            agent_outs = agent_outs.unsqueeze(1)
+        elif agent_outs.dim() == 3:
+            # Could be [Bn, 1, A] or [Bn, A, 1] – make it [Bn, 1, A]
+            if agent_outs.shape[1] != 1 and agent_outs.shape[2] == 1:
+                agent_outs = agent_outs.transpose(1, 2)
+        else:
+            raise RuntimeError(f"Unexpected agent_outs shape: {agent_outs.shape}")
         Bn, _, A = agent_outs.shape
         qvals = agent_outs.view(bs, self.n_agents, A)
 
-        # Cache role stats time-step-wise as [bs, n_agents, R]
-        if isinstance(info, dict) and "role_mean" in info and "role_log_var" in info:
-            R = info["role_mean"].shape[-1]
-            self._aux_cache["role_mean"].append(info["role_mean"].view(bs, self.n_agents, R))
-            self._aux_cache["role_log_var"].append(info["role_log_var"].view(bs, self.n_agents, R))
+        # Cache role stats for KL + diversity loss
+        if isinstance(info, dict):
+            if "role_mean" in info:
+                R = info["role_mean"].shape[-1]
+                self._aux_cache["role_mean"].append(info["role_mean"].view(bs, self.n_agents, R))
+            if "role_log_var" in info:
+                R = info["role_log_var"].shape[-1]
+                self._aux_cache["role_log_var"].append(info["role_log_var"].view(bs, self.n_agents, R))
+            # optional: if you prefer diversity on sampled roles
+            if "role_embedding" in info:
+                R = info["role_embedding"].shape[-1]
+                self._aux_cache["role_emb"].append(info["role_embedding"].view(bs, self.n_agents, R))
 
         return qvals
 

@@ -16,7 +16,7 @@ target_update_interval: 200
 
 # use the Q_Learner to train
 mac: "custom_mac"
-agent: "role_rnn"
+agent: "role_sep_rnn"
 hidden_size: 64
 rnn_hidden_size: 64
 n_head: 4
@@ -28,10 +28,17 @@ role_kl_weoght: 0.001
 role_mi_weight: 0.01
 role_diversity_weight: 0.005
 
+# Loss parameters
+role_kl_beta: 5e-3
+role_kl_warmup_steps: 20000
+role_divserverity_weight: 5e-3
+role_div_across_types_only: True
+role_div_kernel_gamma: 2.0
+
 
 agent_output_type: q
 
-learner: "nq_learner"
+learner: "nq_role_learner"
 mixer: "ss_mixer"
 
 mixing_n_head: 4
@@ -42,7 +49,7 @@ td_lambda: 0.6
 optimizer: 'adam'
 q_lambda: False
 
-name: "role_qmix"
+name: "role_sep_qmix"
 
 obs_agent_id: False # Include the agent's one_hot id in the observation
 obs_last_action: False # Include the agent's last action (one_hot) in the observation

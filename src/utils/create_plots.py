@@ -10,28 +10,16 @@ import pandas as pd
 import re
 
 
-# New Sacred layout:
-# sacred/
-#   game_name/
-#     game_agents/            # e.g., 5v5, 10v10
-#       model_name/
-#         run_num/            # e.g., 0, 1, 2...
-#           metrics.json
-
-
 # ----------------------------------------------------------------------
 #                       Helpers for naming/pretty titles
 # ----------------------------------------------------------------------
 def make_game_key(game_name: str, agents: str) -> str:
-    """Internal key for a subgame: 'game__agents'."""
     return f"{game_name}__{agents}"
 
 def split_game_key(game_key: str):
-    """Reverse of make_game_key."""
     if "__" in game_key:
         g, a = game_key.split("__", 1)
     else:
-        # fallback: treat entire key as game
         g, a = game_key, ""
     return g, a
 
@@ -41,24 +29,14 @@ def pretty_game_title(game_key: str) -> str:
 
 
 # ----------------------------------------------------------------------
-#                        Data parsing (new layout)
+#                        Data parsing
 # ----------------------------------------------------------------------
 def info_parser(sacred_directory: Path):
-    """
-    Scans sacred_directory structured as:
-      sacred/game_name/game_agents/model_name/run_num
-    Returns:
-      games:          set[str]            # subgame keys 'game__agents'
-      game_groups:    dict[str, set[str]] # base game -> set of subgame keys
-      models:         set[str]            # all model names found
-      model_game:     dict[str, set[str]] # model -> set of subgame keys it appears in
-      game_model:     dict[str, set[str]] # subgame key -> set of models found
-    """
     games = set()
     models = set()
-    game_groups = {}   # {game_name: set(subgame_keys)}
-    model_game = {}    # {model_name: set(subgame_keys)}
-    game_model = {}    # {subgame_key: set(model_names)}
+    game_groups = {}
+    model_game = {}
+    game_model = {}
 
     sacred_directory = Path(sacred_directory)
 
@@ -89,13 +67,10 @@ def info_parser(sacred_directory: Path):
     return games, game_groups, models, model_game, game_model
 
 def _to_float(v):
-    """Best-effort conversion to float for values coming from Sacred/NumPy dumps."""
     try:
         if isinstance(v, dict):
-            # common sacred pattern: {"py/object": "numpy.float64", "dtype":"...", "value": X}
             if "value" in v:
                 return float(v["value"])
-            # fallback: some dumps put scalar directly under other keys
             for k in ("item", "val"):
                 if k in v:
                     return float(v[k])
@@ -103,35 +78,17 @@ def _to_float(v):
     except Exception:
         return float("nan")
 
-
 def _extract_metric_series_from_info(info_dict, metric_name):
-    """
-    Return (steps, values) for a given metric from info.json.
-
-    Supported layouts:
-      metric_name : [ {"value": v1}, {"value": v2}, ... ]
-      metric_name : [ v1, v2, ... ]
-    Optional steps (any one of):
-      metric_name + "_steps"
-      metric_name + "_x"
-      "steps"
-      "t_env_steps"  # if provided as a list
-    If none found, steps = range(len(values)).
-    """
     if metric_name not in info_dict:
         return None, None
 
     raw_vals = info_dict[metric_name]
-    # Normalize to a list of floats
     if isinstance(raw_vals, list):
         values = [_to_float(x if not isinstance(x, dict) else x.get("value", x)) for x in raw_vals]
     else:
-        # unexpected shape; try to coerce single scalar
         values = [_to_float(raw_vals)]
 
     n = len(values)
-
-    # Try to find a steps array
     steps_candidates = [
         metric_name + "_steps",
         metric_name + "_x",
@@ -151,14 +108,7 @@ def _extract_metric_series_from_info(info_dict, metric_name):
 
     return steps, values
 
-
 def results_parser(sacred_directory, models=None, game_filter=None):
-    """
-    Builds DataFrames for each subgame (game__agents) and metric,
-    reading from info.json in: sacred/game/agents/model/run_num/info.json.
-
-    Also picks best run per model by last test_return_mean.
-    """
     sacred_directory = Path(sacred_directory)
 
     # Discover structure
@@ -183,10 +133,14 @@ def results_parser(sacred_directory, models=None, game_filter=None):
 
     print('Games (subgames):', sorted(list(game_names)))
 
-    metric_names = ['return_mean', 'return_std', 'test_return_mean', 'test_return_std']
+    # Include both reward and win-rate metrics
+    metric_names = [
+        'return_mean', 'return_std', 'test_return_mean', 'test_return_std',
+        'battle_won_mean', 'battle_won_std', 'test_battle_won_mean', 'test_battle_won_std'
+    ]
     dataframes = {g: {m: pd.DataFrame() for m in metric_names} for g in game_names}
 
-    # Walk the new directory tree: game/game_agents/model/run_num/info.json
+    # Walk the directory tree: game/game_agents/model/run_num/info.json
     for game_key in game_names:
         base_game, agents = split_game_key(game_key)
         for model in models:
@@ -210,12 +164,9 @@ def results_parser(sacred_directory, models=None, game_filter=None):
                     print(f"[ERR] Failed to load {info_path}: {e}")
                     continue
 
-                # For each metric, add a Series column
                 for metric in metric_names:
                     steps, values = _extract_metric_series_from_info(info, metric)
                     if steps is None or values is None or len(values) == 0:
-                        # It's fine if some metrics are missing (e.g., only test_* available)
-                        # print(f"[WARN] No values for {metric} in {info_path}")
                         continue
 
                     col_name = f"{model}_{run_dir.name}"
@@ -224,12 +175,11 @@ def results_parser(sacred_directory, models=None, game_filter=None):
                     if dataframes[game_key][metric].empty:
                         dataframes[game_key][metric] = s.to_frame()
                     else:
-                        # Align on index when concatenating (outer join on steps)
                         dataframes[game_key][metric] = pd.concat(
                             [dataframes[game_key][metric], s], axis=1
                         )
 
-    # Pick best run per model by last available test_return_mean
+    # Pick best run per model by last available test_return_mean (kept as before)
     best_model = {g: {} for g in game_names}
     for game_key in game_names:
         df_test_mean = dataframes[game_key].get('test_return_mean', pd.DataFrame())
@@ -239,7 +189,6 @@ def results_parser(sacred_directory, models=None, game_filter=None):
             continue
 
         for m in models:
-            # columns for this model: "<model>_<run>"
             cols = [c for c in df_test_mean.columns if c.rsplit('_', 1)[0] == m]
             if not cols:
                 best_model[game_key][m] = None
@@ -251,46 +200,49 @@ def results_parser(sacred_directory, models=None, game_filter=None):
                 series = df_test_mean[c].dropna()
                 if series.empty:
                     continue
-                val = series.iloc[-1]  # last recorded test_return_mean
+                val = series.iloc[-1]
                 if val > best_val:
                     best_val = val
-                    best_run = c.rsplit('_', 1)[1]  # run number as string
+                    best_run = c.rsplit('_', 1)[1]
             best_model[game_key][m] = best_run
 
     return dataframes, best_model, game_names, game_groups, model_game, game_model
 
 
+# ----------------------------------------------------------------------
+#                         Plot preparation (metricized)
+# ----------------------------------------------------------------------
+def _metric_keys(metric_base: str):
+    """
+    Returns (train_mean, test_mean, train_std, test_std) keys.
+    metric_base in {'return', 'battle_won'}
+    """
+    base = 'return' if metric_base == 'return' else 'battle_won'
+    return f'{base}_mean', f'test_{base}_mean', f'{base}_std', f'test_{base}_std'
 
-# ----------------------------------------------------------------------
-#                         Plot preparation (unchanged)
-# ----------------------------------------------------------------------
-def get_model_variant_data(dataframes, game_name, model_variant):
-    df_wide_train = dataframes[game_name]['return_mean'].copy()
-    df_wide_test  = dataframes[game_name]['test_return_mean'].copy()
-    # allow missing one of them
+def get_model_variant_data(dataframes, game_name, model_variant, metric_base='return'):
+    train_mean_key, test_mean_key, _, _ = _metric_keys(metric_base)
+    df_wide_train = dataframes[game_name].get(train_mean_key, pd.DataFrame()).copy()
+    df_wide_test  = dataframes[game_name].get(test_mean_key,  pd.DataFrame()).copy()
     common_cols = sorted(list(set(df_wide_train.columns) & set(df_wide_test.columns)))
-    df_wide_train = df_wide_train[common_cols]
-    df_wide_test  = df_wide_test[common_cols]
+    df_wide_train = df_wide_train[common_cols] if not df_wide_train.empty else pd.DataFrame(columns=common_cols)
+    df_wide_test  = df_wide_test[common_cols]  if not df_wide_test.empty  else pd.DataFrame(columns=common_cols)
 
     models_to_plot = [c for c in common_cols if c.rsplit('_', 1)[0] == model_variant]
     df_wide_train = df_wide_train[models_to_plot]
     df_wide_test  = df_wide_test[models_to_plot]
     return df_wide_train, df_wide_test
 
-
-def prepare_avg_data_for_plotting(dataframes, game_name, game_model, ci_z=1.15, max_step=None):
-    # ci_z=1.15 ~ 75% CI; using columns (#runs) for SEM
+def prepare_avg_data_for_plotting(dataframes, game_name, game_model, ci_z=1.15, max_step=None, metric_base='return'):
     models_to_plot = game_model[game_name]
     avg_data = {}
 
     for model in models_to_plot:
         avg_data[model] = {}
-        df_train, df_test = get_model_variant_data(dataframes, game_name, model)
+        df_train, df_test = get_model_variant_data(dataframes, game_name, model, metric_base=metric_base)
         for df, split in zip([df_train, df_test], ['train', 'test']):
             if df.empty:
-                steps = np.array([])
-                mean  = np.array([])
-                lower = upper = np.array([])
+                steps = np.array([]); mean = lower = upper = np.array([])
             else:
                 if max_step is not None:
                     df = df[df.index <= max_step]
@@ -309,16 +261,19 @@ def prepare_avg_data_for_plotting(dataframes, game_name, game_model, ci_z=1.15, 
             avg_data[model][f'{split}_upper'] = upper
     return avg_data
 
-
-def prepare_best_data_for_plotting(dataframes, game_name, best_model, max_step=None):
+def prepare_best_data_for_plotting(dataframes, game_name, best_model, max_step=None, metric_base='return'):
     models_to_plot = {m: r for m, r in best_model[game_name].items() if r is not None}
     best_data = {}
+    train_mean_key, test_mean_key, train_std_key, test_std_key = _metric_keys(metric_base)
 
     for model, run_num in models_to_plot.items():
         best_data[model] = {}
-        for prefix in ['', 'test_']:
-            df_mean = dataframes[game_name].get(prefix + 'return_mean', pd.DataFrame())
-            df_std  = dataframes[game_name].get(prefix + 'return_std',  pd.DataFrame())
+        for prefix, mean_key, std_key in [
+            ('', train_mean_key, train_std_key),
+            ('test_', test_mean_key, test_std_key),
+        ]:
+            df_mean = dataframes[game_name].get(mean_key, pd.DataFrame())
+            df_std  = dataframes[game_name].get(std_key,  pd.DataFrame())
             split   = 'train_' if prefix == '' else 'test_'
 
             if df_mean.empty or f"{model}_{run_num}" not in df_mean.columns:
@@ -370,14 +325,18 @@ def common_legend(all_models, palette, test_only):
             legend_handles.extend([handle_train, handle_test])
     return legend_handles
 
-def build_output(best_or_avg, is_subplot, output_dir, filename, test_only):
+def build_output(best_or_avg, is_subplot, output_dir, filename, test_only, metric_folder):
     root = Path(output_dir) if output_dir else Path('plots')
+    root = root / metric_folder  # <- put results under metric-specific subfolder
     test_or_train = 'test_only' if test_only else 'train_and_test'
     folder = (root / 'subplots' / f"{best_or_avg}_subplots" / test_or_train) if is_subplot else (root / f"{best_or_avg}_models" / test_or_train)
     folder.mkdir(parents=True, exist_ok=True)
     return folder / f"{filename}.png"
 
-def create_plots(data, game_name, best_or_avg, output_dir, palette=None, test_only=False, fill_between=True, ax=None):
+def create_plots(
+    data, game_name, best_or_avg, output_dir, palette=None, test_only=False,
+    fill_between=True, ax=None, metric_label="Reward", metric_folder="return_mean", ylim=None
+):
     models_to_plot = list(data.keys())
 
     if ax is None:
@@ -413,49 +372,60 @@ def create_plots(data, game_name, best_or_avg, output_dir, palette=None, test_on
                 ax.fill_between(xdata, lower, upper, color=col, alpha=0.15)
 
     title = pretty_game_title(game_name)
+    if ylim is not None:
+        ax.set_ylim(*ylim)
+
     if new_fig:
         legend_handles = common_legend(models_to_plot, model_color, test_only)
         fig.legend(handles=legend_handles, loc='lower center', ncols=max(1, len(models_to_plot)), frameon=False,
                    fontsize='small', handletextpad=0.5, columnspacing=1, bbox_to_anchor=(0.5, 0.0))
         ax.set_xlabel('Training steps')
-        ax.set_ylabel('Reward')
-        ax.set_title(f'{best_or_avg} model reward evolution for {title}')
+        ax.set_ylabel(metric_label)
+        ax.set_title(f'{best_or_avg} model {metric_label.lower()} evolution for {title}')
         filename = f"{best_or_avg}_model_{game_name}" + ("_test_only" if test_only else "")
-        out_path = build_output(best_or_avg, False, output_dir, filename, test_only)
+        out_path = build_output(best_or_avg, False, output_dir, filename, test_only, metric_folder)
         plt.savefig(out_path, dpi=400)
         plt.close()
     else:
         ax.set_title(title)
 
-def create_subplots(base_game, same_game, dataframes, all_models, model_type, best_or_avg, output_dir, test_only=False, fill_between=True, max_step=None):
+def create_subplots(
+    base_game, same_game, dataframes, all_models, model_type, best_or_avg, output_dir,
+    test_only=False, fill_between=True, max_step=None, metric_base='return',
+    metric_label="Reward", metric_folder="return_mean", ylim=None
+):
     n_tasks = len(same_game)
     fig, axs = plt.subplots(1, n_tasks, figsize=(15 * n_tasks, 15), sharex=True)
     if n_tasks == 1:
         axs = [axs]
 
-    fig.suptitle(f"{best_or_avg} model reward evolution for tasks of {base_game}")
+    fig.suptitle(f"{best_or_avg} model {metric_label.lower()} evolution for tasks of {base_game}")
 
     plot_function = prepare_best_data_for_plotting if best_or_avg == 'best' else prepare_avg_data_for_plotting
     palette = palette_choice(all_models, test_only)
     legend_handles = common_legend(all_models, palette, test_only)
 
     for ax, game_name in zip(axs, same_game):
-        if best_or_avg == 'best':
-            plot_data = plot_function(dataframes, game_name, model_type, max_step=max_step)
-        else:
-            plot_data = plot_function(dataframes, game_name, model_type, max_step=max_step)
-        create_plots(plot_data, game_name, best_or_avg, output_dir=None, palette=palette, test_only=test_only, fill_between=fill_between, ax=ax)
+        plot_data = plot_function(dataframes, game_name, model_type, max_step=max_step, metric_base=metric_base)
+        create_plots(
+            plot_data, game_name, best_or_avg, output_dir=None, palette=palette,
+            test_only=test_only, fill_between=fill_between, ax=ax,
+            metric_label=metric_label, metric_folder=metric_folder, ylim=ylim
+        )
 
     mid = len(axs) // 2
     axs[mid].set_xlabel("Training steps", labelpad=20)
-    axs[0].set_ylabel('Episodic Reward', labelpad=20)
+    axs[0].set_ylabel(metric_label, labelpad=20)
+    if ylim is not None:
+        for ax in axs:
+            ax.set_ylim(*ylim)
 
     fig.legend(handles=legend_handles, loc='lower center', ncols=max(1, len(all_models)), frameon=False,
                fontsize='medium', handletextpad=0.5, columnspacing=1, bbox_to_anchor=(0.5, 0.0))
     fig.tight_layout(rect=[0, 0.10, 1, 0.95])
 
     filename = f"{best_or_avg}_model_{base_game}_subtasks" + ("_test_only" if test_only else "")
-    out_path = build_output(best_or_avg, True, output_dir, filename, test_only)
+    out_path = build_output(best_or_avg, True, output_dir, filename, test_only, metric_folder)
     fig.savefig(out_path, dpi=400)
     plt.close(fig)
 
@@ -465,9 +435,9 @@ def create_subplots(base_game, same_game, dataframes, all_models, model_type, be
 # ----------------------------------------------------------------------
 def cli():
     p = argparse.ArgumentParser()
-    p.add_argument("--sacred_directory", type=str, default="./sacred")  # root of the new layout
-    p.add_argument("--models", nargs='+', default=None)                  # restrict to specific model names
-    p.add_argument("--game", type=str, required=False)                  # filter to one base game_name
+    p.add_argument("--sacred_directory", type=str, default="./sacred")
+    p.add_argument("--models", nargs='+', default=None)
+    p.add_argument("--game", type=str, required=False)
     p.add_argument("--test_only", action="store_true")
     p.add_argument("--no_fill_between", action="store_false")
     p.add_argument("--linestyle", type=str, default='solid')
@@ -485,27 +455,53 @@ if __name__ == "__main__":
         args.sacred_directory, args.models, args.game
     )
 
-    print('Plotting standalone subgames')
-    for game_name in sorted(list(game_names)):
-        # Best
-        best_data = prepare_best_data_for_plotting(dataframes, game_name, best_model, max_step=args.max_step)
-        create_plots(best_data, game_name, 'best', args.output_dir, None, args.test_only, args.no_fill_between)
-        # Average
-        avg_data = prepare_avg_data_for_plotting(dataframes, game_name, game_model, max_step=args.max_step)
-        create_plots(avg_data, game_name, 'avg', args.output_dir, None, args.test_only, args.no_fill_between)
+    # Helper to run the full plotting suite for a given metric
+    def run_metric_suite(metric_base: str, metric_folder: str, metric_label: str, ylim=None):
+        print(f'Plotting standalone subgames ({metric_base})')
+        for game_name in sorted(list(game_names)):
+            # Best
+            best_data = prepare_best_data_for_plotting(
+                dataframes, game_name, best_model, max_step=args.max_step, metric_base=metric_base
+            )
+            create_plots(
+                best_data, game_name, 'best', args.output_dir, None, args.test_only,
+                args.no_fill_between, metric_label=metric_label, metric_folder=metric_folder, ylim=ylim
+            )
+            # Average
+            avg_data = prepare_avg_data_for_plotting(
+                dataframes, game_name, game_model, max_step=args.max_step, metric_base=metric_base
+            )
+            create_plots(
+                avg_data, game_name, 'avg', args.output_dir, None, args.test_only,
+                args.no_fill_between, metric_label=metric_label, metric_folder=metric_folder, ylim=ylim
+            )
 
-    # Models per base game (for subplots)
-    base_game_model = {}
-    for base_game, subgames in game_groups.items():
-        base_game_model[base_game] = set()
-        for subgame in subgames:
-            base_game_model[base_game].update(list(game_model.get(subgame, [])))
+        # Subplots per base game
+        base_game_model = {}
+        for base_game, subgames in game_groups.items():
+            base_game_model[base_game] = set()
+            for subgame in subgames:
+                base_game_model[base_game].update(list(game_model.get(subgame, [])))
 
-    print('Plotting subplots per base game')
-    for base_game, subgames in game_groups.items():
-        same_game = sorted(list(subgames))
-        all_models = sorted(list(base_game_model[base_game]))
-        # Best
-        create_subplots(base_game, same_game, dataframes, all_models, best_model, 'best', args.output_dir, args.test_only, args.no_fill_between, max_step=args.max_step)
-        # Avg
-        create_subplots(base_game, same_game, dataframes, all_models, game_model, 'avg', args.output_dir, args.test_only, args.no_fill_between, max_step=args.max_step)
+        print(f'Plotting subplots per base game ({metric_base})')
+        for base_game, subgames in game_groups.items():
+            same_game = sorted(list(subgames))
+            all_models = sorted(list(base_game_model[base_game]))
+            # Best
+            create_subplots(
+                base_game, same_game, dataframes, all_models, best_model, 'best', args.output_dir,
+                args.test_only, args.no_fill_between, max_step=args.max_step,
+                metric_base=metric_base, metric_label=metric_label, metric_folder=metric_folder, ylim=ylim
+            )
+            # Avg
+            create_subplots(
+                base_game, same_game, dataframes, all_models, game_model, 'avg', args.output_dir,
+                args.test_only, args.no_fill_between, max_step=args.max_step,
+                metric_base=metric_base, metric_label=metric_label, metric_folder=metric_folder, ylim=ylim
+            )
+
+    # 1) Rewards -> plots/return_mean/...
+    run_metric_suite(metric_base="return", metric_folder="return_mean", metric_label="Reward", ylim=None)
+
+    # 2) Win rate -> plots/battle_won/... (y in [0,1])
+    run_metric_suite(metric_base="battle_won", metric_folder="battle_won", metric_label="Win rate", ylim=(0.0, 1.0))

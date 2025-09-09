@@ -26,6 +26,7 @@ class RoleEmergentAgent(nn.Module):
         # Role embedding dimension (continuous latent space)
         self.role_dim = getattr(args, 'role_dim', 32)
         self.use_ensemble = getattr(args, 'use_ensemble', False)
+        self.head_mean = getattr(args, 'head_mean', False)
         
         # Type-aware encoding: Extract unit capability features
         self.capability_encoder = nn.Sequential(
@@ -88,9 +89,11 @@ class RoleEmergentAgent(nn.Module):
                     nn.Linear(H, self.n_actions)
                 ) for _ in range(self.n_q_heads)
             ])
-            self.q_aggregator = nn.Sequential(
-                nn.Linear(self.role_dim, self.n_q_heads), nn.Softmax(dim=-1)
-            )
+            if self.head_mean:
+                self.q_aggregator = nn.Sequential(
+                    nn.Linear(self.role_dim, self.n_q_heads), nn.Softmax(dim=-1)
+                )
+
         else:
             self.q_network = nn.Sequential(
                 nn.Linear(self.rnn_hidden_dim + self.role_dim, H*2),
@@ -109,10 +112,10 @@ class RoleEmergentAgent(nn.Module):
 
         # Optionally append id / last action to own obs (algo‑side flags)
         if getattr(self.args, "obs_agent_id", False):
-            agent_idx = embedding_indices[0].reshape(-1, 1, 1)
+            agent_idx = embedding_indices[0].reshape(-1, 1)
             own_feats = th.cat([own_feats, agent_idx], dim=-1)
         if getattr(self.args, "obs_last_action", False):
-            last_act = embedding_indices[-1].reshape(-1, 1, 1)
+            last_act = embedding_indices[-1].reshape(-1, 1)
             own_feats = th.cat([own_feats, last_act], dim=-1)
         
         # Extract capability features from own_feats (use_full_feat=True)
@@ -168,9 +171,19 @@ class RoleEmergentAgent(nn.Module):
         q_in = th.cat([rnn_output, role_embedding], dim=-1)                                 # [B,Hr+R]
         if self.use_ensemble:
             qs = th.stack([head(q_in) for head in self.q_heads], dim=-1) # [B,A,K]
-            w  = self.q_aggregator(role_embedding).unsqueeze(1)                    # [B,1,K]
-            q_values = (qs * w).sum(dim=-1)                              # [B,A]
+            if self.head_mean:
+                w  = self.q_aggregator(role_embedding).unsqueeze(1)                    # [B,1,K]
+                q_values = (qs * w).sum(dim=-1)     # [B,A]
+            else:
+                q_values = qs.mean(dim=-1)          # [B,A]
         else:
             q_values = self.q_network(q_in)                              # [B,A]
         
-        return q_values, rnn_output.view(bs, self.n_agents, self.rnn_hidden_dim)
+        hidden_out = rnn_output.view(bs, self.n_agents, self.rnn_hidden_dim)
+
+        # Info for the learner
+        info = {'role_embedding': role_embedding, # [Bn, R]
+                'role_mean': role_mean,           # [Bn, R]
+                'role_log_var': role_log_var}
+
+        return q_values.unsqueeze(-1), hidden_out, info

@@ -76,9 +76,11 @@ class NQLearner:
         self.device = th.device('cuda' if args.use_cuda else 'cpu')
         self.params = list(mac.parameters())
 
-        self.role_kl_beta_max = getattr(args, "role_kl_beta", 1e-3)
-        self.role_kl_warmup  = getattr(args, "role_kl_warmup_steps", 50_000)
-
+        self.role_kl_beta_max = float(getattr(args, "role_kl_beta", 1e-3))
+        self.role_kl_warmup  = int(getattr(args, "role_kl_warmup_steps", 50000))
+        self.role_div_weight = float(getattr(args, "role_diversity_weight", 0.0))
+        self.role_div_across_types_only = getattr(args, "role_div_across_types_only", True)
+        self.role_div_kernel_gamma = float(getattr(args, "role_div_kernel_gamma", 2.0))
 
         if args.mixer == "qatten":
             self.mixer = QattenMixer(args)
@@ -140,12 +142,6 @@ class NQLearner:
         # Calculate estimated Q-Values
         self.mac.set_train_mode()
         mac_out = []
-
-        # Store role information for auxiliary losses
-        role_embeddings = []  # [time, n_agents, batch, role_dim]
-        role_means = []
-        role_log_vars = []
-        predicted_next_contexts = []
         
         self.mac.init_hidden(batch.batch_size, n_agents = self.args.n_agents)
 
@@ -153,53 +149,6 @@ class NQLearner:
             agent_outs = self.mac.forward(batch, t=t, test_mode = False)
             mac_out.append(agent_outs)
 
-            # ------------------------------------------------------------------------------
-            # Collect role information from each agent at this timestep
-            if hasattr(self.mac.agents[0], 'last_role_embedding'):
-                t_role_embeddings = []
-                t_role_means = []
-                t_role_log_vars = []
-                t_predicted_next = []
-                
-                for agent_id in range(self.args.n_agents):
-                    agent = self.mac.agents[agent_id]
-                    if hasattr(agent, 'last_role_embedding'):
-                        t_role_embeddings.append(agent.last_role_embedding)
-                        t_role_means.append(agent.last_role_mean)
-                        t_role_log_vars.append(agent.last_role_log_var)
-                        if hasattr(agent, 'predicted_next_context'):
-                            t_predicted_next.append(agent.predicted_next_context)
-                
-                if len(t_role_embeddings) > 0:
-                    role_embeddings.append(th.stack(t_role_embeddings, dim=0))  # [n_agents, batch, role_dim]
-                    role_means.append(th.stack(t_role_means, dim=0))
-                    role_log_vars.append(th.stack(t_role_log_vars, dim=0))
-                    if len(t_predicted_next) > 0:
-                        predicted_next_contexts.append(th.stack(t_predicted_next, dim=0))
-            # ------------------------------------------------------------------------------
-            # ------------------------------------------------------------------------------
-
-        # --- Role KL regularizer (optional; present if the agent provided stats) ---
-        aux = self.mac.pop_aux() if hasattr(self.mac, "pop_aux") else {}
-        role_kl_loss = None
-        if "role_mean" in aux and "role_log_var" in aux:
-            # aux: [B, T, n_agents, R], match TD time indexing (use [:, :-1])
-            mu = aux["role_mean"][:, :-1]      # [B, T-1, n_agents, R]
-            lv = aux["role_log_var"][:, :-1]   # [B, T-1, n_agents, R]
-
-            # Per-(B,t,agent) KL
-            kl_btna = _role_kl(mu, lv, reduce="none")  # [B, T-1, n_agents]
-
-            # Reuse your TD mask & termination handling
-            kl_mask = batch["filled"][:, :-1].float()  # [B, T-1, 1] or [B, T-1]
-            kl_mask[:, 1:] = kl_mask[:, 1:] * (1 - batch["terminated"][:, :-1].float())
-            if kl_mask.dim() == 2:
-                kl_mask = kl_mask.unsqueeze(-1)        # [B, T-1, 1]
-            kl_mask = kl_mask.expand_as(kl_btna)       # [B, T-1, n_agents]
-
-            denom = kl_mask.sum().clamp_min(1.0)
-            role_kl_loss = (kl_btna * kl_mask).sum() / denom
-            # ------------------------------------------------------------------------------
 
         mac_out = th.stack(mac_out, dim=1)  # Concat over time
         # TODO: double DQN action, COMMENT: do not need copy
@@ -235,6 +184,7 @@ class NQLearner:
                     self.args, self.target_mixer, target_max_qvals, batch, rewards, terminated, mask, self.args.gamma,
                     self.args.td_lambda
                 )
+                
 
         # Set mixing net to training mode
         self.mixer.train()
@@ -253,51 +203,86 @@ class NQLearner:
         mask_elems = mask.sum()
         loss = masked_td_error.sum() / mask_elems
 
-        if role_kl_loss is not None:
-            beta = _beta_schedule(self.train_t, self.role_kl_beta_max, self.role_kl_warmup)
-            loss = loss + beta * role_kl_loss
-
         # ------------------------------------------------------------------------------
         # =================
         # Role-specific losses
         # =================
-        auxiliary_losses = {}
-        total_aux_loss = 0
-        # Only compute if we have role information
-        if len(role_embeddings) > 0:
-            # Stack across time
-            role_embeddings = th.stack(role_embeddings, dim=0)  # [time, n_agents, batch, role_dim]
-            role_means = th.stack(role_means, dim=0)
-            role_log_vars = th.stack(role_log_vars, dim=0)
-            
-            # 1. KL Regularization Loss (prevents role collapse)
-            kl_loss = self.compute_kl_loss(role_means, role_log_vars, mask[:, :, 0])  # mask is [batch, time, 1]
-            self.auxiliary_losses['role_kl'] = kl_loss.item()
-            total_aux_loss += self.args.role_kl_weight * kl_loss  # Default: 0.001
-            
-            # 2. Mutual Information Loss (R3DM - makes roles predictive)
-            if len(predicted_next_contexts) > 0 and len(predicted_next_contexts) == batch.max_seq_length - 1:
-                predicted_next = th.stack(predicted_next_contexts, dim=0)  # [time-1, n_agents, batch, context_dim]
-                mi_loss = self.compute_mi_loss(
-                    predicted_next, 
-                    batch["obs"][:, 1:],  # Next observations
-                    self.mac.agents[0].own_encoder,  # Encoder to get actual next context
-                    mask[:, :-1, 0]
-                )
-                self.auxiliary_losses['role_mi'] = mi_loss.item()
-                total_aux_loss += self.args.role_mi_weight * mi_loss  # Default: 0.01
-            
-            # 3. Diversity Loss (encourages different roles for different unit types)
-            if self.args.n_agents > 1:
-                diversity_loss = self.compute_diversity_loss(role_embeddings, mask[:, :, 0])
-                self.auxiliary_losses['role_diversity'] = diversity_loss.item()
-                total_aux_loss += self.args.role_diversity_weight * diversity_loss  # Default: 0.005
-        
-        # Total loss
-        loss += total_aux_loss
+        # Pull auxiliary role stats from MAC (requires CustomMAC.forward caching & pop_aux())
+        aux = self.mac.pop_aux() if hasattr(self.mac, "pop_aux") else {}
 
+        # Rebuild the 2D timestep mask (B, T-1) to align all aux losses with TD loss
+        mask_t = batch["filled"][:, :-1].float()
+        term2 = batch["terminated"][:, :-1].float()
+        if mask_t.dim() == 3:   # sometimes [B,T-1,1]
+            mask_t = mask_t.squeeze(-1)
+        if term2.dim() == 3:
+            term2 = term2.squeeze(-1)
+        mask_t[:, 1:] = mask_t[:, 1:] * (1 - term2[:, :-1])
+
+        total_aux = 0.0
+
+        # -------- 1) β·KL(role) --------
+        if "role_mean" in aux and "role_log_var" in aux:
+            # aux tensors are [B, T, n_agents, R] — use T-1 like TD
+            mu = aux["role_mean"][:, :-1]         # [B,T-1,Na,R]
+            lv = aux["role_log_var"][:, :-1]      # [B,T-1,Na,R]
+
+            # KL per (B,t,agent)
+            kl_btna = _role_kl(mu, lv)            # [B,T-1,Na,R]
+            kl_btna = kl_btna.sum(dim=-1)         # sum over R -> [B,T-1,Na]
+
+            # Use the same expanded mask already used for TD
+            # (your 'mask' variable below is already expanded to [B,T-1,Na])
+            mask_btna = self._expand_timestep_mask_like(kl_btna, mask_t)
+
+            denom = mask_btna.sum().clamp_min(1.0)
+            kl_loss = (kl_btna * mask_btna).sum() / denom
+
+            beta = _beta_schedule(self.train_t, self.role_kl_beta_max, self.role_kl_warmup)
+            total_aux = total_aux + beta * kl_loss
+            self.logger.log_stat("role_kl", kl_loss.item(), t_env)
+            self.logger.log_stat("role_kl_beta", beta, t_env)
+
+        # -------- 2) Diversity across agents (RBF on L2 distance), across different unit types only --------
+        if self.role_div_weight > 0.0 and "role_mean" in aux and aux["role_mean"].size(2) > 1:
+            Z = aux["role_mean"][:, :-1]                  # [B,T-1,Na,R] — role means for stability
+            B, Tm1, Na, R = Z.shape
+            Zbt = Z.reshape(B*Tm1, Na, R)                    # [BT,Na,R]
+
+            # Pairwise L2 distances and exponential kernel
+            D = th.cdist(Zbt, Zbt, p=2)                   # [BT,Na,Na]
+            K = th.exp(-self.role_div_kernel_gamma * D)   # [BT,Na,Na]
+
+            # Off-diagonal mask
+            offdiag = 1 - th.eye(Na, device=K.device, dtype=K.dtype)  # [Na,Na]
+            offdiag = offdiag.unsqueeze(0).expand(B*Tm1, -1, -1)      # [BT,Na,Na]
+
+            # Optionally exclude same-type pairs (keeps “last 3” features = unit_type one-hot)
+            if self.role_div_across_types_only:
+                types = batch["obs"][:, :-1, :, -3:]      # [B,T-1,Na,3]
+                t_idx = types.argmax(dim=-1)              # [B,T-1,Na]
+                ti = t_idx.reshape(B*Tm1, Na, 1)
+                tj = t_idx.reshape(B*Tm1, 1, Na)
+                diff_types = (ti != tj).to(K.dtype)       # [BT,Na,Na]
+                pair_mask = offdiag * diff_types
+            else:
+                pair_mask = offdiag
+
+            # Average kernel value over valid (i,j) pairs per (B,t)
+            pair_count = pair_mask.sum(dim=(1,2)).clamp_min(1.0)      # [BT]
+            K_mean_bt = (K * pair_mask).sum(dim=(1,2)) / pair_count   # [BT]
+            K_mean = K_mean_bt.view(B, Tm1)                            # [B,T-1]
+
+            # Weight by timestep mask
+            div_loss = (K_mean * mask_t).sum() / mask_t.sum().clamp_min(1.0)
+
+            total_aux = total_aux + self.role_div_weight * div_loss
+            self.logger.log_stat("role_div", div_loss.item(), t_env)
+
+        # Add aux to base TD loss
+        loss = loss + total_aux
         # ------------------------------------------------------------------------------
-
+        
         # Optimise
         self.optimiser.zero_grad()
         loss.backward()
@@ -328,73 +313,21 @@ class NQLearner:
             self.log_stats_t = t_env
         th.cuda.empty_cache()
 
-    # ------------------------------------------------------------------------------
-    def compute_mi_loss(self, predicted_next, next_obs, encoder, mask):
-        """
-        Compute mutual information loss between role and future dynamics
-        Args:
-            predicted_next: [time-1, n_agents, batch, context_dim]
-            next_obs: [batch, time, n_agents, obs_dim]
-            encoder: The own_encoder network to process observations
-            mask: [batch, time-1]
-        """
-        batch_size, time_minus_1, n_agents, obs_dim = next_obs[:, 1:].shape
-        
-        # Reshape and encode actual next observations
-        next_obs_flat = next_obs[:, 1:].reshape(-1, obs_dim)  # [batch*time*n_agents, obs_dim]
-        with th.no_grad():
-            actual_next_context = encoder(next_obs_flat)  # [batch*time*n_agents, context_dim]
-        actual_next_context = actual_next_context.reshape(batch_size, time_minus_1, n_agents, -1)
-        actual_next_context = actual_next_context.permute(1, 2, 0, 3)  # [time-1, n_agents, batch, context_dim]
-        
-        # MSE loss between predicted and actual
-        mi_loss = F.mse_loss(predicted_next, actual_next_context, reduction='none')
-        mi_loss = mi_loss.mean(dim=-1)  # Average over context_dim
-        mi_loss = mi_loss.mean(dim=1)  # Average over agents
-        mi_loss = mi_loss.permute(1, 0)  # [batch, time-1]
-        
-        # Apply mask
-        mi_loss = (mi_loss * mask).sum() / mask.sum()
-        
-        return mi_loss
+    # -------------------------------------------------------------------------------
+    def _role_kl(self, mu, logvar):  # returns [..., R]
+        return 0.5 * (mu.pow(2) + logvar.exp() - logvar - 1.0)
 
+    def _beta_schedule(self, step: int, beta_max=1e-3, warmup=50_000):
+        s = min(1.0, float(step) / float(warmup))
+        return beta_max * s
+    
+    def _expand_timestep_mask_like(self, x: th.Tensor, mask_t: th.Tensor) -> th.Tensor:
+        m = mask_t
+        while m.dim() < x.dim():
+            m = m.unsqueeze(-1)
+        return m.expand_as(x)
 
-    def compute_diversity_loss(self, role_embeddings, mask):
-        """
-        Encourage diverse roles across different agents
-        Args:
-            role_embeddings: [time, n_agents, batch, role_dim]
-            mask: [batch, time]
-        """
-        time_steps, n_agents, batch_size, role_dim = role_embeddings.shape
-        
-        if n_agents < 2:
-            return th.tensor(0.0, device=role_embeddings.device)
-        
-        diversity_loss = 0
-        valid_pairs = 0
-        
-        # Compute pairwise similarities
-        for t in range(time_steps):
-            for i in range(n_agents):
-                for j in range(i + 1, n_agents):
-                    # Compute distance between agent i and j at time t
-                    dist = th.norm(role_embeddings[t, i] - role_embeddings[t, j], dim=-1)  # [batch]
-                    
-                    # Penalize if too similar (small distance)
-                    similarity_penalty = th.exp(-2 * dist)  # Exponential penalty for similarity
-                    
-                    # Apply mask
-                    similarity_penalty = (similarity_penalty * mask[:, t]).sum() / (mask[:, t].sum() + 1e-8)
-                    diversity_loss += similarity_penalty
-                    valid_pairs += 1
-        
-        if valid_pairs > 0:
-            diversity_loss = diversity_loss / valid_pairs
-        
-        return diversity_loss
-        # ------------------------------------------------------------------------------
-
+    # -------------------------------------------------------------------------------
         
     def _update_targets(self):
         self.target_mac.load_state(self.mac)
