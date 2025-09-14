@@ -32,7 +32,6 @@ for SEED in "${SEEDS[@]}"; do
       env_args.capability_config.n_enemies="$N_ENEMIES" \
       obs_agent_id="$OBS_AGENT_ID" \
       name="$name" \
-      use_ensemble="$ensemble" \
       obs_last_action="$OBS_LAST_ACTION" \
       env_args.obs_last_action="$OBS_LAST_ACTION" \
       env_args.seed="$SEED" \

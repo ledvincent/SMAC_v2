@@ -78,6 +78,7 @@ class NQLearner:
 
         self.role_kl_beta_max = float(getattr(args, "role_kl_beta", 1e-3))
         self.role_kl_warmup  = int(getattr(args, "role_kl_warmup_steps", 50000))
+        self.role_diversity = getattr(args, "role_diversity", False)
         self.role_div_weight = float(getattr(args, "role_diversity_weight", 0.0))
         self.role_div_across_types_only = getattr(args, "role_div_across_types_only", True)
         self.role_div_kernel_gamma = float(getattr(args, "role_div_kernel_gamma", 2.0))
@@ -244,40 +245,41 @@ class NQLearner:
             self.logger.log_stat("role_kl_beta", beta, t_env)
 
         # -------- 2) Diversity across agents (RBF on L2 distance), across different unit types only --------
-        if self.role_div_weight > 0.0 and "role_mean" in aux and aux["role_mean"].size(2) > 1:
-            Z = aux["role_mean"][:, :-1]                  # [B,T-1,Na,R] — role means for stability
-            B, Tm1, Na, R = Z.shape
-            Zbt = Z.reshape(B*Tm1, Na, R)                    # [BT,Na,R]
+        if self.role_diversity:
+            if self.role_div_weight > 0.0 and "role_mean" in aux and aux["role_mean"].size(2) > 1:
+                Z = aux["role_mean"][:, :-1]                  # [B,T-1,Na,R] — role means for stability
+                B, Tm1, Na, R = Z.shape
+                Zbt = Z.reshape(B*Tm1, Na, R)                    # [BT,Na,R]
 
-            # Pairwise L2 distances and exponential kernel
-            D = th.cdist(Zbt, Zbt, p=2)                   # [BT,Na,Na]
-            K = th.exp(-self.role_div_kernel_gamma * D)   # [BT,Na,Na]
+                # Pairwise L2 distances and exponential kernel
+                D = th.cdist(Zbt, Zbt, p=2)                   # [BT,Na,Na]
+                K = th.exp(-self.role_div_kernel_gamma * D)   # [BT,Na,Na]
 
-            # Off-diagonal mask
-            offdiag = 1 - th.eye(Na, device=K.device, dtype=K.dtype)  # [Na,Na]
-            offdiag = offdiag.unsqueeze(0).expand(B*Tm1, -1, -1)      # [BT,Na,Na]
+                # Off-diagonal mask
+                offdiag = 1 - th.eye(Na, device=K.device, dtype=K.dtype)  # [Na,Na]
+                offdiag = offdiag.unsqueeze(0).expand(B*Tm1, -1, -1)      # [BT,Na,Na]
 
-            # Optionally exclude same-type pairs (keeps “last 3” features = unit_type one-hot)
-            if self.role_div_across_types_only:
-                types = batch["obs"][:, :-1, :, -3:]      # [B,T-1,Na,3]
-                t_idx = types.argmax(dim=-1)              # [B,T-1,Na]
-                ti = t_idx.reshape(B*Tm1, Na, 1)
-                tj = t_idx.reshape(B*Tm1, 1, Na)
-                diff_types = (ti != tj).to(K.dtype)       # [BT,Na,Na]
-                pair_mask = offdiag * diff_types
-            else:
-                pair_mask = offdiag
+                # Optionally exclude same-type pairs (keeps “last 3” features = unit_type one-hot)
+                if self.role_div_across_types_only:
+                    types = batch["obs"][:, :-1, :, -3:]      # [B,T-1,Na,3]
+                    t_idx = types.argmax(dim=-1)              # [B,T-1,Na]
+                    ti = t_idx.reshape(B*Tm1, Na, 1)
+                    tj = t_idx.reshape(B*Tm1, 1, Na)
+                    diff_types = (ti != tj).to(K.dtype)       # [BT,Na,Na]
+                    pair_mask = offdiag * diff_types
+                else:
+                    pair_mask = offdiag
 
-            # Average kernel value over valid (i,j) pairs per (B,t)
-            pair_count = pair_mask.sum(dim=(1,2)).clamp_min(1.0)      # [BT]
-            K_mean_bt = (K * pair_mask).sum(dim=(1,2)) / pair_count   # [BT]
-            K_mean = K_mean_bt.view(B, Tm1)                            # [B,T-1]
+                # Average kernel value over valid (i,j) pairs per (B,t)
+                pair_count = pair_mask.sum(dim=(1,2)).clamp_min(1.0)      # [BT]
+                K_mean_bt = (K * pair_mask).sum(dim=(1,2)) / pair_count   # [BT]
+                K_mean = K_mean_bt.view(B, Tm1)                            # [B,T-1]
 
-            # Weight by timestep mask
-            div_loss = (K_mean * mask_t).sum() / mask_t.sum().clamp_min(1.0)
+                # Weight by timestep mask
+                div_loss = (K_mean * mask_t).sum() / mask_t.sum().clamp_min(1.0)
 
-            total_aux = total_aux + self.role_div_weight * div_loss
-            self.logger.log_stat("role_div", div_loss.item(), t_env)
+                total_aux = total_aux + self.role_div_weight * div_loss
+                self.logger.log_stat("role_div", div_loss.item(), t_env)
 
         # Add aux to base TD loss
         loss = loss + total_aux

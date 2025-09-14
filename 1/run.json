@@ -1,0 +1,117 @@
+{
+  "artifacts": [],
+  "command": "my_main",
+  "experiment": {
+    "base_dir": "/home/ledvincent/smac/SMAC_v2/src",
+    "dependencies": [
+      "numpy==1.26.4",
+      "PyYAML==5.3.1",
+      "sacred==0.8.7",
+      "torch==2.6.0+cu124"
+    ],
+    "mainfile": "main.py",
+    "name": "pymarl",
+    "repositories": [
+      {
+        "commit": "4b58fc57dd6b93bf0cf388264a0886a5c2f1ebe9",
+        "dirty": true,
+        "url": "https://github.com/ledvincent/SMAC_v2"
+      },
+      {
+        "commit": "4b58fc57dd6b93bf0cf388264a0886a5c2f1ebe9",
+        "dirty": true,
+        "url": "https://github.com/ledvincent/SMAC_v2"
+      }
+    ],
+    "sources": [
+      [
+        "main.py",
+        "_sources/main_a8f8b00443531f9e825ddf96ed49684f.py"
+      ],
+      [
+        "utils/logging.py",
+        "_sources/logging_155c5b52526cf1b2f8e7fe2d18d75660.py"
+      ]
+    ]
+  },
+  "heartbeat": "2025-09-10T14:28:28.804723",
+  "host": {
+    "ENV": {},
+    "cpu": "11th Gen Intel(R) Core(TM) i9-11900K @ 3.50GHz",
+    "gpus": {
+      "driver_version": "550.163.01",
+      "gpus": [
+        {
+          "model": "NVIDIA GeForce RTX 3090",
+          "persistence_mode": false,
+          "total_memory": 24576
+        }
+      ]
+    },
+    "hostname": "ia-ubuntu",
+    "os": [
+      "Linux",
+      "Linux-6.8.0-64-generic-x86_64-with-glibc2.39"
+    ],
+    "python_version": "3.10.16"
+  },
+  "meta": {
+    "command": "my_main",
+    "config_updates": {
+      "env_args": {
+        "capability_config": {
+          "n_enemies": 5,
+          "n_units": 5
+        },
+        "obs_last_action": false,
+        "reward_win": 200,
+        "seed": 0
+      },
+      "name": "role_kl_sep_qmix",
+      "obs_agent_id": false,
+      "obs_last_action": false,
+      "use_wandb": false
+    },
+    "named_configs": [],
+    "options": {
+      "--beat-interval": null,
+      "--capture": null,
+      "--comment": null,
+      "--debug": false,
+      "--enforce_clean": false,
+      "--file_storage": null,
+      "--force": false,
+      "--help": false,
+      "--id": null,
+      "--loglevel": null,
+      "--mongo_db": null,
+      "--name": null,
+      "--pdb": false,
+      "--print-config": false,
+      "--priority": null,
+      "--queue": false,
+      "--s3": null,
+      "--sql": null,
+      "--tiny_db": null,
+      "--unobserved": false,
+      "COMMAND": null,
+      "UPDATE": [
+        "env_args.capability_config.n_units=5",
+        "env_args.capability_config.n_enemies=5",
+        "obs_agent_id=False",
+        "name=role_kl_sep_qmix",
+        "obs_last_action=False",
+        "env_args.obs_last_action=False",
+        "env_args.seed=0",
+        "env_args.reward_win=200",
+        "use_wandb=False"
+      ],
+      "help": false,
+      "with": true
+    }
+  },
+  "resources": [],
+  "result": null,
+  "start_time": "2025-09-10T12:34:42.025181",
+  "status": "RUNNING"
+}

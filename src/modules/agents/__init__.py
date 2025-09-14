@@ -9,7 +9,7 @@ from .att_agent import CustomAtt_RNNAgent
 from .bias_agent import MHA_QAgent
 from .tactical_agent import CAPERNN_ContRoles_HPN
 from .role_agent import RoleEmergentAgent
-from .role_agent import RoleEmergentAgent as RoleEmergentAgent2
+from .role_sep_agent import RoleEmergentAgent as RoleEmergentAgent2
 
 REGISTRY["rnn"] = RNNAgent
 REGISTRY["hpn_rnn"] = HPN_RNNAgent

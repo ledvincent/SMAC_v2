@@ -83,7 +83,7 @@ class SetAttentionBlock(nn.Module):
         self.head_dim = hidden_dim // n_heads
 
         # Project to shared space H
-            
+        self.project_queries = nn.Linear(q_hidden_dim, hidden_dim)
         self.project_keys    = nn.Linear(k_hidden_dim, hidden_dim)
 
     def forward(self, queries: th.Tensor, keys: th.Tensor) -> th.Tensor:

@@ -25,12 +25,12 @@ class RoleEmergentAgent(nn.Module):
         
         # Role embedding dimension (continuous latent space)
         self.role_dim = getattr(args, 'role_dim', 32)
+        self.role_embed_add = getattr(args, 'role_embed_add', False)
         
         # Type-aware encoding: Extract unit capability features
         self.capability_encoder = nn.Sequential(
             nn.Linear(4, H),  # sight_range, shoot_range, cooldown, max_cooldown
-            nn.ReLU(), 
-            nn.LayerNorm(H)
+            nn.SiLU(),
         )
         
         # Context encoder for environmental observations
@@ -65,15 +65,27 @@ class RoleEmergentAgent(nn.Module):
         )
         
         # GRU for temporal modeling
-        self.gru = nn.GRUCell(
-            H + self.role_dim,  # context + role
-            self.rnn_hidden_dim
-        )
+        if self.role_embed_add:
+            self.gru = nn.GRUCell(
+                H,  # context
+                self.rnn_hidden_dim
+            )
+        else:
+            self.gru = nn.GRUCell(
+                H + self.role_dim,  # context + role
+                self.rnn_hidden_dim
+            )
         
         # Final q_values computation
-        self.move_head = nn.Linear(self.rnn_hidden_dim + self.role_dim, self.output_normal_actions)
-
-        self.shoot_head = SetAttentionBlock(self.rnn_hidden_dim + self.role_dim, # GRU output + role_embed
+        if self.role_embed_add:
+            self.move_head = nn.Linear(self.rnn_hidden_dim + self.role_dim, self.output_normal_actions)
+            self.shoot_head = SetAttentionBlock(self.rnn_hidden_dim + self.role_dim, # GRU output + role_embed
+                                             self.hidden_dim, # enemy_feats_dim
+                                             self.hidden_dim, # Proj hidden dim
+                                             self.n_heads)
+        else:
+            self.move_head = nn.Linear(self.rnn_hidden_dim, self.output_normal_actions)
+            self.shoot_head = SetAttentionBlock(self.rnn_hidden_dim, # GRU output only
                                              self.hidden_dim, # enemy_feats_dim
                                              self.hidden_dim, # Proj hidden dim
                                              self.n_heads)
@@ -138,13 +150,20 @@ class RoleEmergentAgent(nn.Module):
             role_embedding = role_mean  # Use mean during evaluation
         
         # Temporal processing with GRU
-        gru_input = th.cat([context, role_embedding], dim=-1) # [Bn,H+R]
+        if self.role_embed_add:
+            gru_input = context # [Bn,H]
+        else:
+            gru_input = th.cat([context, role_embedding], dim=-1) # [Bn,H+R]
+
+
         hidden_state = hidden_state.reshape(-1, self.rnn_hidden_dim) # [Bn, rnn_hidden_dim]
         rnn_output = self.gru(gru_input, hidden_state) # [bs*n_agents,rnn_hidden_dim]
 
         # Generate Q-values with multiple heads conditioned on role
-        # q_in = th.cat([rnn_output, role_embedding], dim=-1)        # [Bn,rnn_hidden_dim + R]                           # [B,Hr+R]
-        q_in = rnn_output
+        if self.role_embed_add:
+            q_in = th.cat([rnn_output, role_embedding], dim=-1)        # [Bn,rnn_hidden_dim + R]                           # [B,Hr+R]
+        else:
+            q_in = rnn_output       # [Bn,rnn_hidden_dim]                           # [B,Hr+R]
 
         # Compute Q-values
         # Move head

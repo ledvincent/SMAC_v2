@@ -12,20 +12,23 @@ cd "$REPO_ROOT"
 
 # Params
 GPU_ID=0
-CONFIG=ss_qmix
+CONFIG=role_kl_qmix
 ENV_CONFIG=sc2_v2_protoss
 SEEDS=(0)
-max_steps=5000000
+max_steps=1500000
 
-BATCH_SIZE=32
-BATCH_SIZE_RUN=2
-
-N_UNITS=8
-N_ENEMIES=8
+N_UNITS=2
+N_ENEMIES=2
+TEAM_WEIGHTS='[0.5,0.5,0.0]'
 
 OBS_AGENT_ID=False
 OBS_LAST_ACTION=False
+max_steps=1500000
 USE_WANDB=False
+name="role_kl_qmix"
+ensemble=False
+role_diversity=False
+reward_win=200
 
 for SEED in "${SEEDS[@]}"; do
   CUDA_VISIBLE_DEVICES="$GPU_ID" python src/main.py \
@@ -34,12 +37,15 @@ for SEED in "${SEEDS[@]}"; do
     with \
       env_args.capability_config.n_units="$N_UNITS" \
       env_args.capability_config.n_enemies="$N_ENEMIES" \
+      env_args.capability_config.team_gen.weights="$TEAM_WEIGHTS" \
       t_max="$max_steps" \
-      batch_size="$BATCH_SIZE" \
-      batch_size_run="$BATCH_SIZE_RUN" \
       obs_agent_id="$OBS_AGENT_ID" \
+      name="$name" \
+      use_ensemble="$ensemble" \
+      role_diversity="$role_diversity" \
       obs_last_action="$OBS_LAST_ACTION" \
       env_args.obs_last_action="$OBS_LAST_ACTION" \
       env_args.seed="$SEED" \
-      use_wandb="$USE_WANDB" 
+      env_args.reward_win="$reward_win" \
+      use_wandb="$USE_WANDB"
 done

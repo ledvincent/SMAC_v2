@@ -12,7 +12,7 @@ cd "$REPO_ROOT"
 
 # Params
 GPU_ID=0
-CONFIG=ss_qmix
+CONFIG=role_kl_sep_qmix
 ENV_CONFIG=sc2_v2_protoss
 SEEDS=(0)
 max_steps=5000000
@@ -26,6 +26,10 @@ N_ENEMIES=8
 OBS_AGENT_ID=False
 OBS_LAST_ACTION=False
 USE_WANDB=False
+name="role_sep_qmix2"
+role_diversity=False
+role_embed_add=True
+reward_win=200
 
 for SEED in "${SEEDS[@]}"; do
   CUDA_VISIBLE_DEVICES="$GPU_ID" python src/main.py \
@@ -38,8 +42,12 @@ for SEED in "${SEEDS[@]}"; do
       batch_size="$BATCH_SIZE" \
       batch_size_run="$BATCH_SIZE_RUN" \
       obs_agent_id="$OBS_AGENT_ID" \
+      name="$name" \
       obs_last_action="$OBS_LAST_ACTION" \
       env_args.obs_last_action="$OBS_LAST_ACTION" \
       env_args.seed="$SEED" \
-      use_wandb="$USE_WANDB" 
+      env_args.reward_win="$reward_win" \
+      role_diversity="$role_diversity" \
+      role_embed_add="$role_embed_add" \
+      use_wandb="$USE_WANDB"
 done
