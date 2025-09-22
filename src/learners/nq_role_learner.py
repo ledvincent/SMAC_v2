@@ -232,8 +232,7 @@ class NQLearner:
             kl_btna = _role_kl(mu, lv)            # [B,T-1,Na,R]
             kl_btna = kl_btna.sum(dim=-1)         # sum over R -> [B,T-1,Na]
 
-            # Use the same expanded mask already used for TD
-            # (your 'mask' variable below is already expanded to [B,T-1,Na])
+            # Mask invalid timesteps (termination / filled)
             mask_btna = self._expand_timestep_mask_like(kl_btna, mask_t)
 
             denom = mask_btna.sum().clamp_min(1.0)
