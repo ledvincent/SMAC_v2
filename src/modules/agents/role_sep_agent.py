@@ -64,28 +64,15 @@ class RoleEmergentAgent(nn.Module):
             nn.Linear(H, self.role_dim * 2)  # mean and log_var for VAE-style
         )
         
-        # GRU for temporal modeling
-        if self.role_embed_add:
-            self.gru = nn.GRUCell(
-                H,  # context
-                self.rnn_hidden_dim
-            )
-        else:
-            self.gru = nn.GRUCell(
-                H + self.role_dim,  # context + role
-                self.rnn_hidden_dim
-            )
+        self.gru = nn.GRUCell(
+            H + self.role_dim,  # context + role
+            self.rnn_hidden_dim
+        )
         
         # Final q_values computation
         if self.role_embed_add:
             self.move_head = nn.Linear(self.rnn_hidden_dim + self.role_dim, self.output_normal_actions)
             self.shoot_head = SetAttentionBlock(self.rnn_hidden_dim + self.role_dim, # GRU output + role_embed
-                                             self.hidden_dim, # enemy_feats_dim
-                                             self.hidden_dim, # Proj hidden dim
-                                             self.n_heads)
-        else:
-            self.move_head = nn.Linear(self.rnn_hidden_dim, self.output_normal_actions)
-            self.shoot_head = SetAttentionBlock(self.rnn_hidden_dim, # GRU output only
                                              self.hidden_dim, # enemy_feats_dim
                                              self.hidden_dim, # Proj hidden dim
                                              self.n_heads)
@@ -150,20 +137,14 @@ class RoleEmergentAgent(nn.Module):
             role_embedding = role_mean  # Use mean during evaluation
         
         # Temporal processing with GRU
-        if self.role_embed_add:
-            gru_input = context # [Bn,H]
-        else:
-            gru_input = th.cat([context, role_embedding], dim=-1) # [Bn,H+R]
+        gru_input = context # [Bn,H]
 
 
         hidden_state = hidden_state.reshape(-1, self.rnn_hidden_dim) # [Bn, rnn_hidden_dim]
         rnn_output = self.gru(gru_input, hidden_state) # [bs*n_agents,rnn_hidden_dim]
 
         # Generate Q-values with multiple heads conditioned on role
-        if self.role_embed_add:
-            q_in = th.cat([rnn_output, role_embedding], dim=-1)        # [Bn,rnn_hidden_dim + R]                           # [B,Hr+R]
-        else:
-            q_in = rnn_output       # [Bn,rnn_hidden_dim]                           # [B,Hr+R]
+        q_in = th.cat([rnn_output, role_embedding], dim=-1)        # [Bn,rnn_hidden_dim + R]
 
         # Compute Q-values
         # Move head

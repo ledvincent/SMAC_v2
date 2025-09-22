@@ -12,7 +12,7 @@ cd "$REPO_ROOT"
 
 # Params
 GPU_ID=0
-CONFIG=role_kl_sep_qmix
+CONFIG=role_sep_qmix
 ENV_CONFIG=sc2_v2_protoss
 SEEDS=(0)
 max_steps=5000000
@@ -26,9 +26,8 @@ N_ENEMIES=8
 OBS_AGENT_ID=False
 OBS_LAST_ACTION=False
 USE_WANDB=False
-name="role_sep_qmix2"
+name="role_sep_qmix"
 role_diversity=False
-role_embed_add=True
 reward_win=200
 
 for SEED in "${SEEDS[@]}"; do

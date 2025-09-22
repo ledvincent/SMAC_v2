@@ -75,7 +75,7 @@ class RoleEmergentAgent(nn.Module):
         
         # GRU for temporal modeling
         self.gru = nn.GRUCell(
-            H + self.role_dim,  # context + role
+            H,  # context
             self.rnn_hidden_dim
         )
         
@@ -162,7 +162,7 @@ class RoleEmergentAgent(nn.Module):
         )
         
         # Temporal processing with GRU
-        gru_input = th.cat([context, role_embedding], dim=-1) # [B,Hr+R]
+        gru_input = th.cat([context], dim=-1) # [B,Hr+R]
         hidden_state = hidden_state.reshape(-1, self.rnn_hidden_dim)
         rnn_output = self.gru(gru_input, hidden_state) # [bs*n_agents,rnn_hidden_dim]
         # rnn_output = rnn_output.unsqueeze(1)  # [bs*n_agents,1,rnn_hidden_dim]

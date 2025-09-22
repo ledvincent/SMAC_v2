@@ -1,0 +1,21 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\config/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)",
+      "Read(/C:\\Users\\Tanguy\\Desktop\\folder\\internship\\code\\smac\\SMAC_v2\\src\\envs\\smac_v2\\official/**)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

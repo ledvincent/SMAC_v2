@@ -24,14 +24,24 @@ n_head: 4
 # Optional flags
 use_ensemble: False
 role_dim: 32
-role_kl_weoght: 0.001
+role_kl_weight: 0.001
 role_mi_weight: 0.01
 role_diversity_weight: 0.005
+
+# Loss parameters
+# VAE
+role_kl_beta: 5e-3
+role_kl_warmup_steps: 10000
+# Diversity
+role_diversity: True
+role_divserverity_weight: 5e-3
+role_div_across_types_only: True
+role_div_kernel_gamma: 2.0
 
 
 agent_output_type: q
 
-learner: "nq_learner"
+learner: "nq_role_learner"
 mixer: "ss_mixer"
 
 mixing_n_head: 4

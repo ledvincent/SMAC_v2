@@ -222,7 +222,7 @@ class NQLearner:
 
         total_aux = 0.0
 
-        # -------- 1) β·KL(role) --------
+        # -------- KL divergence --------
         if "role_mean" in aux and "role_log_var" in aux:
             # aux tensors are [B, T, n_agents, R] — use T-1 like TD
             mu = aux["role_mean"][:, :-1]         # [B,T-1,Na,R]

@@ -12,7 +12,7 @@ cd "$REPO_ROOT"
 
 # Params
 GPU_ID=0
-CONFIG=role_kl_qmix
+CONFIG=role_qmix
 ENV_CONFIG=sc2_v2_protoss
 SEEDS=(0)
 max_steps=1500000
@@ -25,7 +25,7 @@ OBS_AGENT_ID=False
 OBS_LAST_ACTION=False
 max_steps=1500000
 USE_WANDB=False
-name="role_kl_qmix"
+name="role_qmix"
 ensemble=False
 role_diversity=False
 reward_win=200
